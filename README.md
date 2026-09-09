@@ -144,10 +144,13 @@ request is sent.
 - **`merge`**: each row is an upserting `replaceOne` whose filter is the key columns' values, so the
   row replaces the document. When `_id` is the key the filter is on `_id`. A null key fails the write.
 - **`replace`**: the write goes to a fresh collection named `<collection>.pz_<timestamp>_<suffix>`,
-  created up front carrying the output's own collection options (collation, validator, capped
-  bounds) and indexes (a bare rename would otherwise drop both with the old collection); commit
-  issues one `renameCollection` with `dropTarget`, which the server applies atomically -- readers
-  see the old collection or the new one, never a mix. A view of the output name is refused.
+  created up front carrying the output's own collection options (collation, validator) and indexes
+  (a bare rename would otherwise drop both with the old collection); commit issues one
+  `renameCollection` with `dropTarget`, which the server applies atomically -- readers see the old
+  collection or the new one, never a mix. An output that is a capped collection, a view, or a
+  timeseries collection is refused before the staging collection is even created: a rename cannot
+  replace a view or a timeseries collection, and a cap would silently keep only its last `max` rows
+  while every row still reports written.
 
 A rejected document fails the write with the server's code and message; a duplicate key (`11000`)
 is not retried. A failure creating the staging collection leaves nothing behind -- that step is one
