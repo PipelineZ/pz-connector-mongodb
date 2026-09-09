@@ -245,11 +245,13 @@ internal sealed class DocumentBatchBuilder
         }
     }
 
+    /// <summary>A value as a reader would write it: strings quoted, scalars in their plain
+    /// spelling, documents and arrays as canonical JSON.</summary>
     internal static string Describe(BsonValue value) => value.BsonType switch
     {
         BsonType.String => $"\"{value.AsString}\"",
-        BsonType.ObjectId => value.AsObjectId.ToString(),
-        _ => MongoSerialization.ToCanonicalJson(value),
+        BsonType.Document or BsonType.Array => MongoSerialization.ToCanonicalJson(value),
+        _ => ToText(value),
     };
 
     private PzConnectorException Refuse(ColumnSpec column, string id, string what) =>

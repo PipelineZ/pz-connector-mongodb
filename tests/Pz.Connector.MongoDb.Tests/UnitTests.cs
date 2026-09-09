@@ -131,12 +131,12 @@ public sealed class SchemaInferenceTests
     }
 
     [Fact]
-    public void Projection_lists_every_column_and_hides_an_unwanted_id()
+    public void Projection_lists_every_column_and_keeps_the_id_for_error_messages()
     {
         var plan = Plan(new BsonDocument { ["a"] = 1, ["b"] = new BsonDocument { ["c"] = 2 } });
         Assert.Equal(new BsonDocument { ["a"] = 1, ["b.c"] = 1, ["_id"] = 1 }, plan.Projection());
         var projected = plan.Project(["b.c"]);
-        Assert.Equal(new BsonDocument { ["b.c"] = 1, ["_id"] = 0 }, projected.Projection());
+        Assert.Equal(new BsonDocument { ["b.c"] = 1 }, projected.Projection());
         Assert.Same(plan, plan.Project(["nope"]));
     }
 }
@@ -449,6 +449,14 @@ public sealed class MongoErrorsTests
         Assert.Same(cancelled, MongoErrors.Wrap(cancelled, MongoRedactor.None, "c"));
         var own = new PzConnectorException("x", false);
         Assert.Same(own, MongoErrors.Wrap(own, MongoRedactor.None, "c"));
+    }
+
+    [Fact]
+    public void A_server_selection_timeout_caused_by_bad_credentials_is_not_transient()
+    {
+        var ex = (PzConnectorException)MongoErrors.Wrap(new TimeoutException("A timeout occurred ... MongoAuthenticationException: Unable to authenticate"), MongoRedactor.None, "c");
+        Assert.False(ex.IsTransient);
+        Assert.Contains("check username, password and auth_source", ex.Message);
     }
 
     [Fact]

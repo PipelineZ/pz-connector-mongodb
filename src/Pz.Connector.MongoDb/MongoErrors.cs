@@ -69,8 +69,13 @@ internal static class MongoErrors
                 return Transient($"{context}: write concern not satisfied: {writeConcern.Message}", redactor, ex);
             case MongoCommandException command:
                 return FromCode(command.Code, command.CodeName, command.ErrorMessage, redactor, context, ex);
-            case TimeoutException:
-                return Transient($"{context}: {ex.Message}", redactor, ex);
+            case TimeoutException timeout:
+                // Server selection times out, rather than failing, when every hello is rejected
+                // for bad credentials; the cluster description inside the message says so.
+                return timeout.Message.Contains("MongoAuthenticationException", StringComparison.Ordinal)
+                    || timeout.Message.Contains("Authentication failed", StringComparison.Ordinal)
+                    ? Fatal($"{context}: authentication failed while selecting a server; check username, password and auth_source", redactor, ex)
+                    : Transient($"{context}: {timeout.Message}", redactor, ex);
             case IOException or SocketException:
                 return Transient($"{context}: {ex.Message}", redactor, ex);
             default:

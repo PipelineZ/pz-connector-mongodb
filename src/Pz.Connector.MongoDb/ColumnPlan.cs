@@ -32,19 +32,15 @@ internal sealed class ColumnPlan
 
     public Schema Schema { get; }
 
-    /// <summary>The <c>find</c> projection: every column's path, and <c>_id</c> switched off when no
-    /// column wants it (the server includes it by default).</summary>
+    /// <summary>The <c>find</c> projection: every column's path. <c>_id</c> is left in even when no
+    /// column wants it (the server includes it by default): a value the plan cannot hold is
+    /// reported by document, and twelve bytes per document is what naming it costs.</summary>
     public BsonDocument Projection()
     {
         var projection = new BsonDocument();
         foreach (var column in Columns)
         {
             projection[column.Name] = 1;
-        }
-
-        if (!projection.Contains("_id"))
-        {
-            projection["_id"] = 0;
         }
 
         return projection;
