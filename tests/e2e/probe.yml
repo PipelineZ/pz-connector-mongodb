@@ -1,0 +1,10 @@
+connection:
+  # Interpolated from the environment by `pz connector test --config`, the same way connections.yml
+  # is: the CI job exports MONGO_URI for both.
+  uri: ${MONGO_URI}
+  database: e2e
+read:
+  dataset: orders_in
+write:
+  output: e2e_probe
+  mode: append

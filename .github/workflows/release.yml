@@ -1,0 +1,121 @@
+# NuGet trusted publishing (OIDC) -- no long-lived API key is stored in this repository.
+# MANUAL PREREQUISITES (one-time):
+#   1. On nuget.org (https://www.nuget.org/account/trustedpublishing -> Add policy), create a trusted
+#      publishing policy naming this repository's owner/name, this exact workflow filename
+#      ("release.yml", no path), and environment "release". Scope it to the package id
+#      "Pz.Connector.MongoDb" with the "Push new packages and package versions" scope -- not
+#      "push only new package versions", which cannot create an id that does not exist yet.
+#   2. Create a GitHub Environment named "release" and add an environment secret NUGET_USER = the
+#      nuget.org profile NAME (not email) of the account owning that policy.
+# Until that setup exists a real `v*` tag push fails at the NuGet/login step with an authentication
+# error. That failure is expected and is not a workflow bug.
+#
+# Tag-triggered only, never on a push to main: MinVer would otherwise produce a height-based
+# prerelease on every commit and publish a new version per merge.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# Shape: Native AOT cannot cross-compile between OSes, so one `publish` job per platform produces
+# that platform's binary and hands the staged directory to
+# the `release` job as an artifact; `release` collects all four under bin/pz-native/, packs once,
+# asserts the manifest and assets, and pushes.
+jobs:
+  publish:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # MinVer computes the release version from this tag plus history.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet cache:
+      # the restore folded into `publish -r` alone does not pull the RID-specific packs this build
+      # needs (NETSDK1112), even though the same restore run standalone does.
+      - run: dotnet restore src/Pz.Connector.MongoDb -r ${{ matrix.rid }}
+      - run: dotnet publish src/Pz.Connector.MongoDb -c Release -r ${{ matrix.rid }} --no-restore
+      # The artifact name IS the RID: download-artifact without a name unpacks every artifact into
+      # <path>/<artifact name>/, which is exactly the <staging>/<rid>/ layout `dotnet pack` collects.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: src/Pz.Connector.MongoDb/bin/pz-native/${{ matrix.rid }}
+          if-no-files-found: error
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release # scopes NUGET_USER to this job, and supports required-reviewer gating.
+    permissions:
+      contents: read
+      id-token: write # required for NuGet/login's OIDC exchange.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # MinVer computes the release version from this tag plus history.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.MongoDb.slnx -c Release
+      # Node facts excluded here, where ci.yml deliberately runs them. Releasing is not the moment
+      # to depend on an image pull: ci.yml ran them on this same commit before it was tagged.
+      - run: >
+          dotnet test Pz.Connector.MongoDb.slnx -c Release --no-build --filter "Category!=Docker"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      # Every platform's staged publish lands under bin/pz-native/<rid>/; pack collects them all (the
+      # SDK's PzRuntimeIdentifiers default) and writes the manifest by RUNNING the linux-x64 binary,
+      # which needs its executable bit back -- artifact zips do not carry file modes.
+      - uses: actions/download-artifact@v4
+        with:
+          path: src/Pz.Connector.MongoDb/bin/pz-native
+      - run: |
+          set -euo pipefail
+          chmod +x src/Pz.Connector.MongoDb/bin/pz-native/*/Pz.Connector.MongoDb
+          ls -lR src/Pz.Connector.MongoDb/bin/pz-native
+          dotnet pack src/Pz.Connector.MongoDb -c Release -o packages
+      # The manifest is what `pz restore` reads: a wrong runtime, name or capability set, or a RID
+      # whose entrypoint never made it into the pack, is only discovered by whoever installs the
+      # release. Assert it here, while the push has not happened and a version can still be skipped
+      # -- a pushed nuget.org version cannot be replaced.
+      - name: Assert the packed manifest before publishing
+        run: |
+          set -euo pipefail
+          VERSION="$(ls packages/Pz.Connector.MongoDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.Elasticsearch\.(.*)\.nupkg|\1|')"
+          PKG="packages/Pz.Connector.MongoDb.${VERSION}.nupkg"
+          unzip -p "${PKG}" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "mongodb"' manifest.json
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+          for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
+            grep -q "\"${rid}\":" manifest.json
+          done
+          ls -l packages
+      - name: NuGet login (trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }} # nuget.org profile name, NOT email -- see prerequisites.
+      - name: Push the package to nuget.org
+        run: >
+          dotnet nuget push 'packages/*.nupkg'
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --skip-duplicate

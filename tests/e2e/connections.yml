@@ -1,0 +1,13 @@
+# Both directions through the packaged connector: read the seeded collection, write an append output.
+docs:
+  connector: mongodb
+  uri: ${MONGO_URI}
+  database: e2e
+  entities:
+    orders_in:
+      read:
+        collection: orders_in
+    orders_out:
+      write:
+        collection: orders_out
+        strategy: append
