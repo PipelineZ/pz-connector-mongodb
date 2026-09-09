@@ -96,7 +96,7 @@ jobs:
       - name: Assert the packed manifest before publishing
         run: |
           set -euo pipefail
-          VERSION="$(ls packages/Pz.Connector.MongoDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.Elasticsearch\.(.*)\.nupkg|\1|')"
+          VERSION="$(ls packages/Pz.Connector.MongoDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.MongoDb\.(.*)\.nupkg|\1|')"
           PKG="packages/Pz.Connector.MongoDb.${VERSION}.nupkg"
           unzip -p "${PKG}" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
