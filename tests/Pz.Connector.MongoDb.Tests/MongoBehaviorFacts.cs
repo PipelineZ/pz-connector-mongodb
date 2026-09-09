@@ -369,4 +369,165 @@ public sealed class MongoBehaviorFacts
         var check = await new MongoConnector().CheckConnectionAsync(config, CancellationToken.None);
         Assert.True(check.Ok, check.Message);
     }
+
+    [SkippableFact]
+    public async Task Merge_with_a_dotted_key_upserts_by_the_nested_field()
+    {
+        var target = MongoFixture.NewName("dotted");
+        var schema = new Schema([new Field("address.city", StringType.Default, true), new Field("n", Int64Type.Default, true)], null);
+        RecordBatch Batch(params (string City, long N)[] rows)
+        {
+            var cities = new StringArray.Builder();
+            var ns = new Int64Array.Builder();
+            foreach (var (city, n) in rows)
+            {
+                cities.Append(city);
+                ns.Append(n);
+            }
+
+            return new RecordBatch(schema, [cities.Build(), ns.Build()], rows.Length);
+        }
+
+        var spec = Output(target, "merge", null, "address.city");
+        await WriteAsync(spec, schema, Batch(("Paris", 1)));
+        await WriteAsync(spec, schema, Batch(("Paris", 2), ("Rome", 3)));
+
+        var docs = await _mongo.AllAsync(target);
+        Assert.Equal(2, docs.Count);
+        var paris = docs.Single(d => d["address"]["city"].AsString == "Paris");
+        Assert.Equal(BsonType.Document, paris["address"].BsonType);
+        Assert.Equal(2L, paris["n"].AsInt64);
+        Assert.False(paris.Contains("address.city"));
+        var rome = docs.Single(d => d["address"]["city"].AsString == "Rome");
+        Assert.Equal(3L, rome["n"].AsInt64);
+    }
+
+    [SkippableFact]
+    public async Task Schema_and_read_use_one_sample_even_when_a_document_lands_in_between()
+    {
+        var collection = await _mongo.SeedAsync(Enumerable.Range(0, 3).Select(_ => new BsonDocument("a", 1)));
+        var spec = Dataset(collection);
+
+        ISourceConnector connector = new MongoConnector();
+        await using var source = await connector.OpenAsync(Config, CancellationToken.None);
+        var declared = (await source.GetSchemaAsync(spec, CancellationToken.None)).Schema;
+
+        await _mongo.InsertAsync(collection, [new BsonDocument { ["a"] = 1, ["b"] = "new" }]);
+
+        var rows = 0;
+        foreach (var partition in await source.PlanReadAsync(spec, ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                Assert.Equal(declared.FieldsList.Select(f => f.Name), batch.Schema.FieldsList.Select(f => f.Name));
+                rows += batch.Length;
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal(4, rows);
+
+        // A second source instance samples fresh: the memo lives on the MongoSource, not globally.
+        ISourceConnector connector2 = new MongoConnector();
+        await using var source2 = await connector2.OpenAsync(Config, CancellationToken.None);
+        var resampled = (await source2.GetSchemaAsync(spec, CancellationToken.None)).Schema;
+        Assert.Contains("b", resampled.FieldsList.Select(f => f.Name));
+    }
+
+    [SkippableFact]
+    public async Task Replace_keeps_the_outputs_collation_and_validator()
+    {
+        var target = MongoFixture.NewName("collate");
+        await _mongo.Db.CreateCollectionAsync(target, new CreateCollectionOptions { Collation = new Collation("en", strength: CollationStrength.Secondary) });
+        await _mongo.Db.RunCommandAsync<BsonDocument>(new BsonDocument
+        {
+            ["collMod"] = target,
+            ["validator"] = new BsonDocument("$jsonSchema", new BsonDocument { ["bsonType"] = "object", ["required"] = new BsonArray { "id" } }),
+        });
+
+        await WriteAsync(Output(target, "replace"), IdName, IdNameBatch((1, "a"), (2, "b")));
+
+        using var listed = await _mongo.Db.ListCollectionsAsync(new ListCollectionsOptions { Filter = new BsonDocument("name", target) });
+        var info = await listed.FirstAsync();
+        var options = info["options"].AsBsonDocument;
+        Assert.Equal("en", options["collation"]["locale"].AsString);
+        Assert.True(options.Contains("validator"));
+
+        // A row that violates the validator fails the write, non-transiently; the staging
+        // collection the replace never got to rename over the output is dropped on abort.
+        var nameOnly = new Schema([new Field("name", StringType.Default, true)], null);
+        var nameValues = new StringArray.Builder();
+        nameValues.Append("x");
+        var badBatch = new RecordBatch(nameOnly, [nameValues.Build()], 1);
+
+        ISinkConnector connector = new MongoConnector();
+        await using var sink = await connector.OpenAsync(Config, CancellationToken.None);
+        var session = await sink.BeginWriteAsync(Output(target, "replace"), nameOnly, CancellationToken.None);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await session.WriteBatchAsync(badBatch, CancellationToken.None);
+            badBatch.Dispose();
+            await session.CommitAsync(CancellationToken.None);
+        });
+        Assert.False(ex.IsTransient);
+        await session.AbortAsync(CancellationToken.None);
+
+        using var namesAfterAbort = await _mongo.Db.ListCollectionNamesAsync();
+        Assert.DoesNotContain(await namesAfterAbort.ToListAsync(), n => n.StartsWith(target + ".pz_", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public async Task Cursor_not_found_is_reported_transient()
+    {
+        var collection = await _mongo.SeedAsync(MongoFixture.Rows(5000));
+        ISourceConnector connector = new MongoConnector();
+        await using var source = await connector.OpenAsync(Config, CancellationToken.None);
+        var spec = Dataset(collection, new() { ["batch_size"] = 10 });
+        var partition = Assert.Single(await source.PlanReadAsync(spec, ReadHints.None, CancellationToken.None));
+
+        // maxRowsPerBatch: 1 forces an Arrow batch after every document, well inside the driver's
+        // first 10-document page (batch_size: 10), so the first yielded batch needs no round trip.
+        var enumerator = partition.ReadAsync(new BatchOptions(MaxRowsPerBatch: 1), CancellationToken.None).GetAsyncEnumerator();
+        try
+        {
+            Assert.True(await enumerator.MoveNextAsync());
+            enumerator.Current.Dispose();
+
+            // Kills every session on the server but the one issuing the command -- which drops the
+            // cursors pinned to them, including the source's still-open find cursor.
+            await _mongo.Client.GetDatabase("admin").RunCommandAsync<BsonDocument>(new BsonDocument("killAllSessions", new BsonArray()));
+
+            PzConnectorException? caught = null;
+            try
+            {
+                while (await enumerator.MoveNextAsync())
+                {
+                    enumerator.Current.Dispose();
+                }
+            }
+            catch (PzConnectorException ex)
+            {
+                caught = ex;
+            }
+
+            if (caught is null)
+            {
+                Skip.If(true, "killAllSessions did not surface as a CursorNotFound failure on this server; no way to reap the connector's cursor from outside");
+                return;
+            }
+
+            Assert.True(caught.IsTransient);
+        }
+        finally
+        {
+            try
+            {
+                await enumerator.DisposeAsync();
+            }
+            catch
+            {
+                // The killed cursor cannot be closed cleanly server-side; nothing more to do.
+            }
+        }
+    }
 }
