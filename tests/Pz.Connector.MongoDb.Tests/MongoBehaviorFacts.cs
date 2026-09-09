@@ -453,8 +453,9 @@ public sealed class MongoBehaviorFacts
         Assert.Equal("en", options["collation"]["locale"].AsString);
         Assert.True(options.Contains("validator"));
 
-        // A row that violates the validator fails the write, non-transiently; the staging
-        // collection the replace never got to rename over the output is dropped on abort.
+        // A row that violates the validator fails the write, non-transiently; the commit itself
+        // drops the staging collection it never got to rename over the output (the session is
+        // already committed at that point, so a caller could not clean up with AbortAsync).
         var nameOnly = new Schema([new Field("name", StringType.Default, true)], null);
         var nameValues = new StringArray.Builder();
         nameValues.Append("x");
@@ -470,10 +471,9 @@ public sealed class MongoBehaviorFacts
             await session.CommitAsync(CancellationToken.None);
         });
         Assert.False(ex.IsTransient);
-        await session.AbortAsync(CancellationToken.None);
 
-        using var namesAfterAbort = await _mongo.Db.ListCollectionNamesAsync();
-        Assert.DoesNotContain(await namesAfterAbort.ToListAsync(), n => n.StartsWith(target + ".pz_", StringComparison.Ordinal));
+        using var namesAfterFailedCommit = await _mongo.Db.ListCollectionNamesAsync();
+        Assert.DoesNotContain(await namesAfterFailedCommit.ToListAsync(), n => n.StartsWith(target + ".pz_", StringComparison.Ordinal));
     }
 
     [SkippableFact]

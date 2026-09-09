@@ -10,7 +10,10 @@ namespace Pz.Connector.MongoDb;
 /// output's batch bound (an ordered <c>insertMany</c> for append and replace, an ordered bulk of
 /// upserting <c>replaceOne</c>s for merge), commit flushes the rest and for a replace renames the
 /// staging collection over the output. Ordered bulks are what make a duplicate key inside one
-/// session resolve last-writer-wins, and what make the first rejected document the one reported.</summary>
+/// session resolve last-writer-wins, and what make the first rejected document the one reported.
+/// A replace commit that fails -- the flush or the rename -- drops its staging collection instead
+/// of renaming it: the session is already committed at that point, so <see cref="AbortAsync"/> can
+/// no longer run, and nothing else would.</summary>
 internal sealed class MongoWriteSession : ISinkWriteSession
 {
     private readonly MongoRedactor _redactor;
@@ -77,15 +80,47 @@ internal sealed class MongoWriteSession : ISinkWriteSession
     {
         ThrowIfFinished();
         _committed = true;
-        await FlushAsync(ct).ConfigureAwait(false);
         if (_replace is { } replace)
         {
-            await RenameAsync(replace, ct).ConfigureAwait(false);
+            try
+            {
+                await FlushAsync(ct).ConfigureAwait(false);
+                await RenameAsync(replace, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // _committed is already true, so AbortAsync can no longer run -- this is the last
+                // chance to drop the staging collection rather than orphan it forever.
+                await DropStagingAfterFailedCommitAsync(replace).ConfigureAwait(false);
+                throw;
+            }
+        }
+        else
+        {
+            await FlushAsync(ct).ConfigureAwait(false);
         }
 
         _logger.LogDebug("mongodb: output {Output}: committed {Rows} rows in {Batches} batches over {Requests} requests",
             _output.Collection, _rows, _batches, _requests);
         return new WriteResult(_rows, _batches);
+    }
+
+    /// <summary>Best effort, on its own short budget -- mirrors <see cref="MongoSink.DropQuietlyAsync"/>.
+    /// The staging collection was never visible under the output's name, so failing to drop it here
+    /// leaves an orphan the operator can drop by hand, named in the warning; it never masks the
+    /// commit's own exception, which the caller still throws.</summary>
+    private async Task DropStagingAfterFailedCommitAsync(ReplacePlan replace)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await _database.DropCollectionAsync(replace.Staging, cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("mongodb: output {Output}: the staging collection {Staging} could not be dropped after a failed commit ({Reason}); drop it by hand",
+                _output.Collection, replace.Staging, _redactor.Redact(ex.Message));
+        }
     }
 
     public async ValueTask AbortAsync(CancellationToken ct)
