@@ -542,10 +542,39 @@ public sealed class MongoErrorsTests
         Assert.False(wrappedDuplicate.IsTransient);
         Assert.Contains("code 11000", wrappedDuplicate.Message);
         Assert.Contains("unique index", wrappedDuplicate.Message);
+    }
 
-        var busy = new MongoWriteConcernException(connectionId, "busy", new WriteConcernResult(new BsonDocument { ["ok"] = 1, ["code"] = 64 }));
-        var wrappedBusy = (PzConnectorException)MongoErrors.Wrap(busy, MongoRedactor.None, "ctx");
-        Assert.True(wrappedBusy.IsTransient);
+    /// <summary>The real server shape (mongo 8.0, create/drop/renameCollection/createIndexes under
+    /// an unsatisfiable <c>w</c>): no top-level <c>code</c> at all, only <c>writeConcernError.code</c>
+    /// -- which the driver's own <see cref="MongoCommandException.Code"/> never reads.</summary>
+    [Fact]
+    public void Write_concern_error_code_nested_under_writeConcernError_is_transient()
+    {
+        var connectionId = new ConnectionId(new ServerId(new ClusterId(1), new DnsEndPoint("h", 1)));
+        var timedOut = new MongoWriteConcernException(connectionId, "timed out", new WriteConcernResult(new BsonDocument
+        {
+            ["ok"] = 1,
+            ["writeConcernError"] = new BsonDocument { ["code"] = 64, ["errmsg"] = "waiting for replication timed out" },
+        }));
+
+        var wrapped = (PzConnectorException)MongoErrors.Wrap(timedOut, MongoRedactor.None, "ctx");
+        Assert.True(wrapped.IsTransient);
+        Assert.Contains("code 64", wrapped.Message);
+    }
+
+    [Fact]
+    public void Write_concern_error_code_nested_under_writeConcernError_can_be_non_transient()
+    {
+        var connectionId = new ConnectionId(new ServerId(new ClusterId(1), new DnsEndPoint("h", 1)));
+        var unmapped = new MongoWriteConcernException(connectionId, "boom", new WriteConcernResult(new BsonDocument
+        {
+            ["ok"] = 1,
+            ["writeConcernError"] = new BsonDocument { ["code"] = 100, ["errmsg"] = "not a known transient code" },
+        }));
+
+        var wrapped = (PzConnectorException)MongoErrors.Wrap(unmapped, MongoRedactor.None, "ctx");
+        Assert.False(wrapped.IsTransient);
+        Assert.Contains("code 100", wrapped.Message);
     }
 
     [Fact]

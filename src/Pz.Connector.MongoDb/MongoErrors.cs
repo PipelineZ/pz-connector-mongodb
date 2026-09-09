@@ -77,7 +77,7 @@ internal static class MongoErrors
                 return FromWriteError(write.WriteError?.Code, write.WriteError?.Message, write.WriteConcernError is not null, redactor, context, ex);
             case MongoWriteConcernException writeConcern:
                 // MongoDuplicateKeyException derives from this one: the code decides, never the type.
-                return FromWriteError(writeConcern.Code, writeConcern.Message, true, redactor, context, ex);
+                return FromWriteError(WriteConcernErrorCode(writeConcern), writeConcern.Message, true, redactor, context, ex);
             case MongoCommandException command:
                 return FromCode(command.Code, command.CodeName, command.ErrorMessage, redactor, context, ex);
             case TimeoutException timeout:
@@ -111,6 +111,25 @@ internal static class MongoErrors
         return IsTransientCode(code) ? Transient(text, redactor, original) : Fatal(text, redactor, original);
     }
 
+    /// <summary>A write-concern failure's real code lives under <c>writeConcernError.code</c> in the
+    /// command result -- the driver's own <see cref="MongoCommandException.Code"/> reads only a
+    /// top-level <c>code</c>, which a write-concern-only response never has, so it always reads -1
+    /// there. Falls back to that -1 when the nested field is absent or not numeric.</summary>
+    private static int? WriteConcernErrorCode(MongoWriteConcernException writeConcern)
+    {
+        var response = writeConcern.WriteConcernResult?.Response;
+        if (response is not null
+            && response.TryGetValue("writeConcernError", out var errorValue)
+            && errorValue is MongoDB.Bson.BsonDocument error
+            && error.TryGetValue("code", out var code)
+            && code.IsNumeric)
+        {
+            return code.ToInt32();
+        }
+
+        return writeConcern.Code;
+    }
+
     private static PzConnectorException FromBulk(MongoBulkWriteException<MongoDB.Bson.BsonDocument> bulk, MongoRedactor redactor, string context)
     {
         var first = bulk.WriteErrors.Count > 0 ? bulk.WriteErrors[0] : null;
@@ -128,7 +147,7 @@ internal static class MongoErrors
     private static PzConnectorException FromWriteError(int? code, string? message, bool writeConcern, MongoRedactor redactor, string context,
         Exception original)
     {
-        if (code is null or 0)
+        if (code is null or < 1)
         {
             return writeConcern
                 ? Transient($"{context}: write concern not satisfied: {original.Message}", redactor, original)
