@@ -104,6 +104,11 @@ jobs:
           for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites; do
             grep -q "\"${cap}\"" manifest.json
           done
+          # The gallery icon and README ride inside the package; a lost <None Pack="true"> item
+          # would only show up on nuget.org, after a version can no longer be replaced.
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+          unzip -p "${PKG}" Pz.Connector.MongoDb.nuspec | grep -q '<icon>icon.png</icon>'
           for rid in linux-x64 linux-arm64 osx-arm64 win-x64; do
             grep -q "\"${rid}\":" manifest.json
           done

@@ -59,12 +59,18 @@ jobs:
           ls packages
           VERSION="$(ls packages/Pz.Connector.MongoDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.MongoDb\.(.*)\.nupkg|\1|')"
           echo "PKG_VERSION=${VERSION}" >> "$GITHUB_ENV"
-          unzip -p "packages/Pz.Connector.MongoDb.${VERSION}.nupkg" pz.connector.json | tee manifest.json
+          PKG="packages/Pz.Connector.MongoDb.${VERSION}.nupkg"
+          unzip -p "${PKG}" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "mongodb"' manifest.json
           for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites; do
             grep -q "\"${cap}\"" manifest.json
           done
+          # The gallery icon and README ride inside the package; a lost <None Pack="true"> item
+          # would only show up on nuget.org, after a version can no longer be replaced.
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+          unzip -p "${PKG}" Pz.Connector.MongoDb.nuspec | grep -q '<icon>icon.png</icon>'
       - name: Start a server
         run: |
           set -euo pipefail
