@@ -86,8 +86,13 @@ documents flatten into `parent.child` columns, and `_id` is one trailing column:
 
 Null and missing values carry no type, so a field that is sometimes absent is simply nullable. Two
 field names that differ only by case, which SQL cannot tell apart, are refused; declare one under
-`fields:` with another name. An empty collection cannot be inferred from (declare `fields:`), and a
-missing collection is reported as missing rather than empty.
+`fields:` with another name. A field whose own name contains a dot -- a document literally keyed
+`"a.b"` -- is refused, naming the field and the document's `_id`: the column named `a.b` is the
+path into a nested document, and the literal field would share that name and lose its values
+silently. More than 2000 distinct field paths, declared or seen while sampling, is a refusal too;
+a field with dynamic keys (a per-user bag, an attribute dictionary) belongs under `fields:` as
+`json`, not as one column per key. An empty collection cannot be inferred from (declare `fields:`),
+and a missing collection is reported as missing rather than empty.
 
 **Values.** A document's value must fit its column losslessly: an integral double or decimal fits
 an integer column, a `decimal128` with more than nine fraction digits or a non-numeric value in a
@@ -139,22 +144,29 @@ request is sent.
 - **`merge`**: each row is an upserting `replaceOne` whose filter is the key columns' values, so the
   row replaces the document. When `_id` is the key the filter is on `_id`. A null key fails the write.
 - **`replace`**: the write goes to a fresh collection named `<collection>.pz_<timestamp>_<suffix>`,
-  created up front with the output's own indexes (a rename would otherwise drop them with the old
-  collection); commit issues one `renameCollection` with `dropTarget`, which the server applies
-  atomically -- readers see the old collection or the new one, never a mix. A view of the output
-  name is refused.
+  created up front carrying the output's own collection options (collation, validator, capped
+  bounds) and indexes (a bare rename would otherwise drop both with the old collection); commit
+  issues one `renameCollection` with `dropTarget`, which the server applies atomically -- readers
+  see the old collection or the new one, never a mix. A view of the output name is refused.
 
 A rejected document fails the write with the server's code and message; a duplicate key (`11000`)
-is not retried. Abort drops a replace's staging collection; an aborted append or merge cannot
+is not retried. A failure while staging the replace -- creating the staging collection or copying
+its indexes -- drops that collection before the error is reported; a failure during commit itself
+does too, since a session already marked committed can no longer abort. An aborted (not yet
+committed) replace drops its staging collection the same way; an aborted append or merge cannot
 unsend the requests it already delivered.
 
 ## Errors
 
 Every failure is `mongodb: <what was being done>: <message> (code n Name)`. No connection at all,
-server-selection and operation timeouts, a primary stepping down or a node recovering, an expired
-cursor, a write conflict, and a write-concern failure are transient and retried by the engine;
-credentials, authorization, a missing collection, a malformed filter, and duplicate keys are not.
-`pz connector check` runs `ping` and `buildInfo` and reports the server version.
+a paused connection pool, a full wait queue, a dropped proxy connection, server-selection and
+operation timeouts, a primary stepping down or a node recovering, a read cursor the server reaped
+for sitting idle, and a write conflict are transient and retried by the engine -- each gets a fresh
+connection, pool slot, or cursor on the next attempt; credentials, authorization, a missing
+collection, and a malformed filter are not. A write error, including a write-concern failure, is
+classified by its own server code rather than by exception type, so a duplicate key (`11000`) is
+never retried even on a write-concern path, but an unsatisfied write concern with no other code, or
+code `64`, is. `pz connector check` runs `ping` and `buildInfo` and reports the server version.
 
 ## Native AOT
 
