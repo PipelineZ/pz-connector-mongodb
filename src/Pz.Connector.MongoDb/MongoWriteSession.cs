@@ -205,7 +205,8 @@ internal sealed class MongoWriteSession : ISinkWriteSession
 
     /// <summary>One <c>renameCollection</c> with <c>dropTarget</c>: the server swaps the namespaces
     /// atomically, so readers see the old collection or the new one, never a mix. A failure here
-    /// leaves the staging collection in place, named, so the operator can finish or discard the swap.</summary>
+    /// leaves the output untouched -- the swap never happened -- and it is <see cref="CommitAsync"/>,
+    /// the only caller, that drops the staging collection this throws out of.</summary>
     private async Task RenameAsync(ReplacePlan replace, CancellationToken ct)
     {
         try
