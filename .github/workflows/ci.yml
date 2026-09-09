@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.MongoDb.slnx -c Release
+      # ubuntu has docker, so the Testcontainers server facts run; windows cannot pull Linux images,
+      # so it runs everything that is not server-backed.
+      - if: runner.os == 'Linux'
+        run: dotnet test Pz.Connector.MongoDb.slnx -c Release --no-build --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      - if: runner.os == 'Windows'
+        run: dotnet test Pz.Connector.MongoDb.slnx -c Release --no-build --filter "Category!=Docker" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+
+  # The other half of the proof: a stranger declares the connector by package id, runs `pz restore`,
+  # and pz spawns the Native AOT binary. The suite above never touches pz's resolver, materializer
+  # or process host; this job proves the AOT publish, the generated manifest and the PCP handshake
+  # fit together against the released pz, with a live server on both ends -- and it is the one place
+  # the driver's reflective paths are exercised under a native image, which no analyzer warning can
+  # stand in for.
+  pack-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish the host RID (Native AOT) and pack
+        run: |
+          set -euo pipefail
+          # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
+          # cache: the restore folded into `publish -r` alone does not pull the RID-specific packs
+          # this build needs (NETSDK1112), even though the same restore run standalone does.
+          dotnet restore src/Pz.Connector.MongoDb -r linux-x64
+          dotnet publish src/Pz.Connector.MongoDb -c Release -r linux-x64 --no-restore
+          dotnet pack src/Pz.Connector.MongoDb -c Release -o packages
+          ls packages
+          VERSION="$(ls packages/Pz.Connector.MongoDb.*.nupkg | sed -E 's|.*/Pz\.Connector\.MongoDb\.(.*)\.nupkg|\1|')"
+          echo "PKG_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          PKG="packages/Pz.Connector.MongoDb.${VERSION}.nupkg"
+          unzip -p "${PKG}" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "mongodb"' manifest.json
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+          # The gallery icon and README ride inside the package; a lost <None Pack="true"> item
+          # would only show up on nuget.org, after a version can no longer be replaced.
+          unzip -l "${PKG}" | grep -q ' icon.png$'
+          unzip -l "${PKG}" | grep -q ' README.md$'
+          unzip -p "${PKG}" Pz.Connector.MongoDb.nuspec | grep -q '<icon>icon.png</icon>'
+      - name: Start a server
+        run: |
+          set -euo pipefail
+          docker run -d --name mongo -p 27017:27017 -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=e2e-secret mongo:8.0
+          for i in $(seq 1 60); do
+            docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin e2e --eval '
+            db.orders_in.insertMany([
+              { id: NumberLong(1), name: "ann", tags: ["a"], address: { city: "Paris" } },
+              { id: NumberLong(2), name: "bob", tags: ["b", "c"], address: { city: "Rome" } },
+              { id: NumberLong(3), name: "cy", tags: [], address: { city: "Oslo" } } ])'
+      - name: Install pz, restore from the local feed, run, conformance-test
+        env:
+          MONGO_URI: mongodb://root:e2e-secret@localhost:27017/?authSource=admin
+        run: |
+          set -euo pipefail
+          dotnet tool install --global pz --version 0.6.0
+          cd tests/e2e
+          sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
+          pz restore --feeds "${GITHUB_WORKSPACE}/packages"
+          PKG_DIR=".pz/packages/Pz.Connector.MongoDb/${PKG_VERSION}"
+          test -f "${PKG_DIR}/native/Pz.Connector.MongoDb"
+          pz run
+          # Three documents in, three documents out: the nested city flattened on the way in and
+          # written back as a plain field, the array carried as JSON text, the ObjectId as hex.
+          docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin e2e --eval 'db.orders_out.find({}, {_id: 0}).sort({id: 1}).toArray()' | tee out.txt
+          test "$(docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin e2e --eval 'db.orders_out.countDocuments()')" = "3"
+          grep -q "name: 'bob'" out.txt
+          grep -q "city: 'Rome'" out.txt
+          grep -q '"b", "c"' out.txt
+          grep -Eq "source_id: '[0-9a-f]{24}'" out.txt
+          # Append is at-least-once: a second run lands the three again and stays green.
+          pz run
+          test "$(docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin e2e --eval 'db.orders_out.countDocuments()')" = "6"
+          pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
+          ! grep -q FAIL report.txt
