@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pz.Connector.MongoDb/Pz.Connector.MongoDb.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pz.Connector.MongoDb.Tests/Pz.Connector.MongoDb.Tests.csproj" />
+  </Folder>
+</Solution>

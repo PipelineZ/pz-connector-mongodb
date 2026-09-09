@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>MongoDB source (sampled or declared schema, watermark range filters, projection pushdown) and sink (insert append, upsert merge, replace by atomic collection rename) connector for PipelineZ (pz), served out of process.</Description>
+    <!-- Native AOT. PublishAot is set here as well as by PzPackaging: through the NuGet package the
+         SDK's derivation lands after restore has already decided whether to pull the ILCompiler
+         pack, and a publish without it silently falls back to a non-AOT layout. -->
+    <PzPackaging>aot</PzPackaging>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- MongoDB.Driver and MongoDB.Bson carry trim/AOT analysis warnings in paths this connector
+         never takes (class-map POCO serialization, LINQ). The aggregate per-assembly warnings are
+         demoted from errors; the BsonDocument-only paths this connector uses are proven at runtime
+         by the packaged-binary CI job. Every serializer the driver's own wire protocol resolves
+         reflectively is registered up front in MongoSerialization. -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2104;IL3053</WarningsNotAsErrors>
+    <MSBuildWarningsNotAsErrors>$(MSBuildWarningsNotAsErrors);IL2104;IL3053</MSBuildWarningsNotAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.6.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.6.0" />
+    <PackageReference Include="MongoDB.Driver" Version="3.11.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pz.Connector.MongoDb.Tests" />
+  </ItemGroup>
+
+</Project>
