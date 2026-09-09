@@ -150,11 +150,12 @@ request is sent.
   see the old collection or the new one, never a mix. A view of the output name is refused.
 
 A rejected document fails the write with the server's code and message; a duplicate key (`11000`)
-is not retried. A failure while staging the replace -- creating the staging collection or copying
-its indexes -- drops that collection before the error is reported; a failure during commit itself
-does too, since a session already marked committed can no longer abort. An aborted (not yet
-committed) replace drops its staging collection the same way; an aborted append or merge cannot
-unsend the requests it already delivered.
+is not retried. A failure creating the staging collection leaves nothing behind -- that step is one
+atomic command, so a failed one created no collection to drop; a failure after it exists, copying
+the output's indexes onto it, drops that collection before the error is reported, and so does a
+failure during commit itself, since a session already marked committed can no longer abort. An
+aborted (not yet committed) replace drops its staging collection the same way; an aborted append or
+merge cannot unsend the requests it already delivered.
 
 ## Errors
 
