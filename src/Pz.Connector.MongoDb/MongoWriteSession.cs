@@ -52,6 +52,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
         ThrowIfFinished();
         for (var row = 0; row < batch.Length; row++)
         {
+            ct.ThrowIfCancellationRequested();
             var document = _writer.Write(batch, row);
             if (_keyColumns.Length > 0)
             {

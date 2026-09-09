@@ -90,27 +90,11 @@ internal sealed record MongoConnectionConfig(
             errors.Add("'auth_source' only applies with 'username'/'password'; inside the uri use ?authSource=");
         }
 
-        var timeout = DefaultTimeoutSeconds;
-        if (config.Values.ContainsKey("timeout"))
+        var timeoutErrors = new List<string>();
+        var timeout = Options.Int(config.Values, "timeout", DefaultTimeoutSeconds, 1, int.MaxValue, "", timeoutErrors);
+        if (timeoutErrors.Count > 0)
         {
-            long? value;
-            try
-            {
-                value = config.GetInt("timeout");
-            }
-            catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
-            {
-                value = null;
-            }
-
-            if (value is null or < 1)
-            {
-                errors.Add("'timeout' must be a positive integer number of seconds");
-            }
-            else
-            {
-                timeout = (int)Math.Min(value.Value, int.MaxValue);
-            }
+            errors.Add("'timeout' must be a positive integer number of seconds");
         }
 
         return errors.Count == start && url is not null && database is not null

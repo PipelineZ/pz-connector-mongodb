@@ -36,22 +36,26 @@ internal sealed class DocumentBatchBuilder
 
     public void Append(BsonDocument document)
     {
-        var id = document.TryGetValue("_id", out var idValue) ? Describe(idValue) : "?";
         var columns = _plan.Columns;
         for (var c = 0; c < columns.Count; c++)
         {
-            _row[c] = Convert(columns[c], document, id);
+            _row[c] = Convert(columns[c], document);
         }
 
         _inner.AppendRow(_row);
     }
 
+    /// <summary>The document's <c>_id</c> as a refusal names it. Formatted only on refusal: a
+    /// per-document string on the happy path would be a million allocations per million rows.</summary>
+    internal static string IdOf(BsonDocument document) => document.TryGetValue("_id", out var id) ? Describe(id) : "?";
+
     public bool TryTakeBatch(out RecordBatch? batch) => _inner.TryTakeBatch(out batch);
 
     public RecordBatch? Flush() => _inner.Flush();
 
-    internal object? Convert(ColumnSpec column, BsonDocument document, string id)
+    internal object? Convert(ColumnSpec column, BsonDocument document)
     {
+        var id = document;
         if (!TryGetPath(document, column.Path, out var value) || value.IsBsonNull || value.BsonType == BsonType.Undefined)
         {
             return null;
@@ -120,7 +124,7 @@ internal sealed class DocumentBatchBuilder
         _ => MongoSerialization.ToCanonicalJson(value),
     };
 
-    private int ToInt32(ColumnSpec column, BsonValue value, string id)
+    private int ToInt32(ColumnSpec column, BsonValue value, BsonDocument id)
     {
         var l = ToInt64(column, value, id);
         if (l is < int.MinValue or > int.MaxValue)
@@ -131,7 +135,7 @@ internal sealed class DocumentBatchBuilder
         return (int)l;
     }
 
-    private long ToInt64(ColumnSpec column, BsonValue value, string id)
+    private long ToInt64(ColumnSpec column, BsonValue value, BsonDocument id)
     {
         switch (value.BsonType)
         {
@@ -141,7 +145,8 @@ internal sealed class DocumentBatchBuilder
                 return value.AsInt64;
             case BsonType.Double:
                 var d = value.AsDouble;
-                if (double.IsInteger(d) && d is >= long.MinValue and <= long.MaxValue)
+                // long.MaxValue rounds UP to 2^63 as a double, so the upper check is strict.
+                if (double.IsInteger(d) && d >= -9223372036854775808.0 && d < 9223372036854775808.0)
                 {
                     return (long)d;
                 }
@@ -159,7 +164,7 @@ internal sealed class DocumentBatchBuilder
         throw Refuse(column, id, $"holds {Describe(value)} where an integer is planned");
     }
 
-    private double ToDouble(ColumnSpec column, BsonValue value, string id) => value.BsonType switch
+    private double ToDouble(ColumnSpec column, BsonValue value, BsonDocument id) => value.BsonType switch
     {
         BsonType.Int32 => value.AsInt32,
         BsonType.Int64 => value.AsInt64,
@@ -168,7 +173,7 @@ internal sealed class DocumentBatchBuilder
         _ => throw Refuse(column, id, $"holds {Describe(value)} where a double is planned"),
     };
 
-    private decimal ToDecimal(ColumnSpec column, BsonValue value, string id)
+    private decimal ToDecimal(ColumnSpec column, BsonValue value, BsonDocument id)
     {
         decimal result;
         switch (value.BsonType)
@@ -213,7 +218,7 @@ internal sealed class DocumentBatchBuilder
         return result;
     }
 
-    private DateTimeOffset ToTimestamp(ColumnSpec column, BsonValue value, string id)
+    private DateTimeOffset ToTimestamp(ColumnSpec column, BsonValue value, BsonDocument id)
     {
         if (value.BsonType != BsonType.DateTime)
         {
@@ -254,6 +259,6 @@ internal sealed class DocumentBatchBuilder
         _ => ToText(value),
     };
 
-    private PzConnectorException Refuse(ColumnSpec column, string id, string what) =>
-        MongoErrors.Fatal($"dataset '{_dataset}': field '{column.Name}' of document {id} {what}", _redactor);
+    private PzConnectorException Refuse(ColumnSpec column, BsonDocument document, string what) =>
+        MongoErrors.Fatal($"dataset '{_dataset}': field '{column.Name}' of document {IdOf(document)} {what}", _redactor);
 }

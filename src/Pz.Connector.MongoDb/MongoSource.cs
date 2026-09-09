@@ -13,6 +13,8 @@ namespace Pz.Connector.MongoDb;
 internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient client, ILogger logger) : ISource
 {
     private readonly IMongoDatabase _database = client.GetDatabase(connection.Database);
+    private readonly Dictionary<string, ColumnPlan> _plans = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _planning = new(1, 1);
 
     public async ValueTask<DatasetSchema> GetSchemaAsync(DatasetSpec spec, CancellationToken ct)
     {
@@ -46,24 +48,48 @@ internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient 
     public ValueTask DisposeAsync()
     {
         client.Dispose();
+        _planning.Dispose();
         return ValueTask.CompletedTask;
     }
 
     /// <summary>A declared schema is the plan. Otherwise the first <c>sample_size</c> documents
     /// matching the user's filter (not the watermark bounds, so an incremental read plans the same
     /// columns as a full one), in ascending <c>_id</c>, are inferred from; an empty sample is a
-    /// refusal, because a dataset with no columns is a misconfiguration, not an empty table.</summary>
+    /// refusal, because a dataset with no columns is a misconfiguration, not an empty table. The
+    /// engine asks for the schema and then plans the read; one sample serves both calls, so the
+    /// staging table and the batches that land in it cannot disagree on the columns because a
+    /// document arrived in between.</summary>
     private async Task<ColumnPlan> PlanAsync(MongoDatasetConfig dataset, DatasetSpec spec, CancellationToken ct)
     {
-        var redactor = connection.Redactor;
-        var context = $"dataset '{spec.Dataset}'";
         if (dataset.Fields is { } fields)
         {
             return new ColumnPlan(fields);
         }
 
+        var key = $"{spec.Dataset}\n{dataset.Collection}\n{dataset.SampleSize}\n{dataset.Filter}";
+        await _planning.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!_plans.TryGetValue(key, out var plan))
+            {
+                plan = await InferAsync(dataset, spec, ct).ConfigureAwait(false);
+                _plans[key] = plan;
+            }
+
+            return plan;
+        }
+        finally
+        {
+            _planning.Release();
+        }
+    }
+
+    private async Task<ColumnPlan> InferAsync(MongoDatasetConfig dataset, DatasetSpec spec, CancellationToken ct)
+    {
+        var redactor = connection.Redactor;
+        var context = $"dataset '{spec.Dataset}'";
         var collection = _database.GetCollection<BsonDocument>(dataset.Collection);
-        var inference = new SchemaInference();
+        var inference = new SchemaInference(spec.Dataset, redactor);
         try
         {
             var options = new FindOptions<BsonDocument>
@@ -94,7 +120,7 @@ internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient 
                 : $"{context}: collection '{dataset.Collection}' does not exist in database '{connection.Database}'; create it or fix 'collection:'", redactor);
         }
 
-        var plan = inference.Plan(spec.Dataset, redactor);
+        var plan = inference.Plan();
         logger.LogDebug("mongodb: dataset {Dataset}: inferred {Columns} columns from {Documents} documents", spec.Dataset, plan.Columns.Count, inference.Documents);
         return plan;
     }

@@ -56,6 +56,7 @@ public sealed class MongoConnector : IConnector, ISourceConnector, ISinkConnecto
             "fields": { "type": "object", "additionalProperties": { "type": "string" } },
             "sample_size": { "type": "integer", "minimum": 1, "maximum": 100000 },
             "batch_size": { "type": "integer", "minimum": 1, "maximum": 100000 },
+            "columns": { "type": "object", "additionalProperties": { "type": "string" } },
             "object_ids": { "type": "array", "items": { "type": "string" } } },
           "additionalProperties": false }
         """;

@@ -8,8 +8,10 @@ namespace Pz.Connector.MongoDb;
 /// widen (int32 -> int64 -> double, anything with a decimal -> decimal); <c>_id</c> is the one
 /// trailing column. Null and missing values carry no kind, so a field that is sometimes absent is
 /// just nullable. The sample is deterministic (ascending <c>_id</c>), so two reads of the same head
-/// of a collection plan the same schema.</summary>
-internal sealed class SchemaInference
+/// of a collection plan the same schema. A field whose own name contains a dot is refused: the
+/// column named <c>a.b</c> is the path into a nested document, and a literal <c>"a.b"</c> field
+/// would share its name and lose its values silently.</summary>
+internal sealed class SchemaInference(string datasetName, MongoRedactor redactor)
 {
     [Flags]
     internal enum Seen
@@ -22,6 +24,7 @@ internal sealed class SchemaInference
 
     private readonly Dictionary<string, Seen> _seen = new(StringComparer.Ordinal);
     private readonly List<string> _order = [];
+    private readonly HashSet<string> _parents = new(StringComparer.Ordinal);
     private Seen _id;
 
     public int Documents { get; private set; }
@@ -37,21 +40,39 @@ internal sealed class SchemaInference
                 continue;
             }
 
-            Walk(element.Name, element.Value);
+            Walk(null, element.Name, element.Value, document);
         }
     }
 
-    private void Walk(string path, BsonValue value)
+    private void Walk(string? parent, string name, BsonValue value, BsonDocument document)
     {
+        if (name.Contains('.'))
+        {
+            throw MongoErrors.Fatal(
+                $"dataset '{datasetName}': field '{name}' of document {DocumentBatchBuilder.IdOf(document)} has a dot in its own name, which a column path cannot tell from a nested field; " +
+                "declare its parent as json under fields:", redactor);
+        }
+
         var kind = KindOf(value);
         if (kind == Seen.None)
         {
             return;
         }
 
+        var path = parent is null ? name : parent + "." + name;
         if (!_seen.TryGetValue(path, out var seen))
         {
             _order.Add(path);
+            if (_order.Count > ColumnPlan.MaxColumns)
+            {
+                throw MongoErrors.Fatal(
+                    $"dataset '{datasetName}': more than {ColumnPlan.MaxColumns} distinct field paths in the sample; a field with dynamic keys should be declared as json under fields:", redactor);
+            }
+
+            if (parent is not null)
+            {
+                _parents.Add(parent);
+            }
         }
 
         _seen[path] = seen | kind;
@@ -59,12 +80,12 @@ internal sealed class SchemaInference
         {
             foreach (var element in value.AsBsonDocument)
             {
-                Walk(path + "." + element.Name, element.Value);
+                Walk(path, element.Name, element.Value, document);
             }
         }
     }
 
-    public ColumnPlan Plan(string datasetName, MongoRedactor redactor)
+    public ColumnPlan Plan()
     {
         // A path lands as JSON when it is ever an array, a value of no scalar kind, or a mix of a
         // document and something else; it is a column of its own kind otherwise. A document-only
@@ -73,7 +94,7 @@ internal sealed class SchemaInference
         var columns = new List<ColumnSpec>();
         foreach (var path in _order)
         {
-            if (json.Any(parent => path.StartsWith(parent + ".", StringComparison.Ordinal)))
+            if (HasJsonAncestor(path, json))
             {
                 continue;
             }
@@ -81,8 +102,7 @@ internal sealed class SchemaInference
             var seen = _seen[path];
             if (seen == Seen.Document)
             {
-                var hasLeaves = _order.Any(other => other.StartsWith(path + ".", StringComparison.Ordinal));
-                if (!hasLeaves)
+                if (!_parents.Contains(path))
                 {
                     columns.Add(ColumnSpec.Of(path, ColumnKind.Json));
                 }
@@ -109,6 +129,19 @@ internal sealed class SchemaInference
         }
 
         return new ColumnPlan(columns);
+    }
+
+    private static bool HasJsonAncestor(string path, HashSet<string> json)
+    {
+        for (var dot = path.IndexOf('.'); dot > 0; dot = path.IndexOf('.', dot + 1))
+        {
+            if (json.Contains(path[..dot]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static ColumnKind Resolve(Seen seen)

@@ -95,12 +95,23 @@ internal sealed class ColumnPlan
 
     public const string KindNames = "string, objectid, int32, int64, double, decimal, bool, timestamp, date, json";
 
+    /// <summary>More columns than this is not a table but a map with dynamic keys (a per-user
+    /// bag, an attribute dictionary); such a field belongs under <c>fields:</c> as <c>json</c>.</summary>
+    public const int MaxColumns = 2000;
+
     /// <summary>Column names are BSON paths and DuckDB identifiers at once: one must not be a
     /// prefix path of another (the projection would clash, and the sink could not nest them), and
     /// two must not differ only by case (DuckDB would fold them together).</summary>
     public static void ValidateNames(IReadOnlyList<string> names, string prefix, List<string> errors)
     {
+        if (names.Count > MaxColumns)
+        {
+            errors.Add($"{prefix}: {names.Count} columns is more than the {MaxColumns} a dataset may have; a field with dynamic keys should be declared as json under fields:");
+            return;
+        }
+
         var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var exact = new HashSet<string>(names, StringComparer.Ordinal);
         foreach (var name in names)
         {
             if (seen.TryGetValue(name, out var other) && !string.Equals(other, name, StringComparison.Ordinal))
@@ -109,15 +120,15 @@ internal sealed class ColumnPlan
             }
 
             seen.TryAdd(name, name);
-        }
 
-        foreach (var name in names)
-        {
-            foreach (var candidate in names)
+            // Every proper dotted prefix of this name is a parent path; one that is also a name is
+            // a value and a parent at once. Linear in the total path length, not quadratic.
+            for (var dot = name.IndexOf('.'); dot > 0; dot = name.IndexOf('.', dot + 1))
             {
-                if (candidate.Length > name.Length + 1 && candidate.StartsWith(name + ".", StringComparison.Ordinal))
+                var parent = name[..dot];
+                if (exact.Contains(parent))
                 {
-                    errors.Add($"{prefix}: field '{name}' is both a value and the parent of '{candidate}'");
+                    errors.Add($"{prefix}: field '{parent}' is both a value and the parent of '{name}'");
                     break;
                 }
             }

@@ -23,6 +23,7 @@ internal static class MongoErrors
         43,     // CursorNotFound (idle cursor reaped; the engine's retry re-reads)
         46,     // LockBusy
         50,     // MaxTimeMSExpired
+        64,     // WriteConcernFailed
         89,     // NetworkTimeout
         91,     // ShutdownInProgress
         112,    // WriteConflict
@@ -57,16 +58,26 @@ internal static class MongoErrors
                 return Fatal($"{context}: authentication failed: {auth.Message}; check username, password and auth_source", redactor, ex);
             case MongoConnectionException connection:
                 return Transient($"{context}: {connection.Message}", redactor, ex);
+            case MongoConnectionPoolPausedException or MongoWaitQueueFullException or MongoDB.Driver.Core.MongoProxyConnectionException:
+                // A pool paused after a prior network error, a pool with no free slot, a proxy
+                // that dropped the connection: the next attempt gets a fresh connection.
+                return Transient($"{context}: {ex.Message}", redactor, ex);
             case MongoConfigurationException configuration:
                 return Fatal($"{context}: {configuration.Message}", redactor, ex);
             case MongoExecutionTimeoutException or MongoNodeIsRecoveringException or MongoNotPrimaryException:
                 return Transient($"{context}: {ex.Message}", redactor, ex);
+            case MongoCursorNotFoundException cursor:
+                // The server reaped an idle cursor; the engine's retry re-reads from the start.
+                return Transient($"{context}: {cursor.Message} (code 43 CursorNotFound)", redactor, ex);
+            case MongoQueryException query:
+                return Fatal($"{context}: {query.Message}", redactor, ex);
             case MongoBulkWriteException<MongoDB.Bson.BsonDocument> bulk:
                 return FromBulk(bulk, redactor, context);
             case MongoWriteException write:
                 return FromWriteError(write.WriteError?.Code, write.WriteError?.Message, write.WriteConcernError is not null, redactor, context, ex);
             case MongoWriteConcernException writeConcern:
-                return Transient($"{context}: write concern not satisfied: {writeConcern.Message}", redactor, ex);
+                // MongoDuplicateKeyException derives from this one: the code decides, never the type.
+                return FromWriteError(writeConcern.Code, writeConcern.Message, true, redactor, context, ex);
             case MongoCommandException command:
                 return FromCode(command.Code, command.CodeName, command.ErrorMessage, redactor, context, ex);
             case TimeoutException timeout:
@@ -117,7 +128,7 @@ internal static class MongoErrors
     private static PzConnectorException FromWriteError(int? code, string? message, bool writeConcern, MongoRedactor redactor, string context,
         Exception original)
     {
-        if (code is null)
+        if (code is null or 0)
         {
             return writeConcern
                 ? Transient($"{context}: write concern not satisfied: {original.Message}", redactor, original)

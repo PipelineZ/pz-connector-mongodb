@@ -8,7 +8,7 @@ namespace Pz.Connector.MongoDb;
 /// <c>batch_size</c> documents per insert or bulk request, and <c>object_ids</c>, the text columns
 /// whose 24-hex values are written as ObjectId (default <c>_id</c>). Column checks against the real
 /// schema happen at BeginWriteAsync (<see cref="ValidateSchema"/>); Parse only knows the option shapes.</summary>
-internal sealed record MongoOutputConfig(string Collection, int BatchSize, IReadOnlySet<string> ObjectIds)
+internal sealed record MongoOutputConfig(string Collection, int BatchSize, IReadOnlySet<string> ObjectIds, bool ObjectIdsDeclared)
 {
     public const int DefaultBatchSize = 1000;
     public const int MaxBatchSize = 100_000;
@@ -53,10 +53,11 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
         }
 
         var batchSize = Options.Int(spec.Options, "batch_size", DefaultBatchSize, 1, MaxBatchSize, prefix, errors);
-        var objectIds = Options.Strings(spec.Options, "object_ids", prefix, errors) ?? ["_id"];
+        var declared = Options.Strings(spec.Options, "object_ids", prefix, errors);
+        var objectIds = declared ?? ["_id"];
 
         return errors.Count == start
-            ? new MongoOutputConfig(collection, batchSize, new HashSet<string>(objectIds, StringComparer.Ordinal))
+            ? new MongoOutputConfig(collection, batchSize, new HashSet<string>(objectIds, StringComparer.Ordinal), declared is not null)
             : null;
     }
 
@@ -82,6 +83,16 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
             if (output.ObjectIds.Contains(field.Name) && field.DataType.TypeId != ArrowTypeId.String)
             {
                 errors.Add($"{prefix}: object_ids entry '{field.Name}' is a {field.DataType.TypeId} column; only a varchar column can hold a 24-hex ObjectId");
+            }
+        }
+
+        if (output.ObjectIdsDeclared)
+        {
+            // The default _id is usually absent from a pipeline's output; a name the author typed
+            // that matches no column is a typo, and the column it meant writes plain strings.
+            foreach (var name in output.ObjectIds.Where(n => schema.FieldsList.All(f => f.Name != n)))
+            {
+                errors.Add($"{prefix}: object_ids entry '{name}' is not a column of the pipeline's output");
             }
         }
 

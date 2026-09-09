@@ -43,13 +43,13 @@ public sealed class SchemaInferenceTests
 {
     private static ColumnPlan Plan(params BsonDocument[] documents)
     {
-        var inference = new SchemaInference();
+        var inference = new SchemaInference("d", MongoRedactor.None);
         foreach (var document in documents)
         {
             inference.Observe(document);
         }
 
-        return inference.Plan("d", MongoRedactor.None);
+        return inference.Plan();
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public sealed class DocumentBatchBuilderTests
         }
 
         target[segments[^1]] = value;
-        return builder.Convert(plan.Columns[0], document, "x");
+        return builder.Convert(plan.Columns[0], document);
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class DocumentBatchBuilderTests
     internal void Lossy_values_are_refused_naming_field_and_document(ColumnKind kind, object raw)
     {
         var ex = Assert.Throws<PzConnectorException>(() => Convert(kind, BsonValue.Create(raw)));
-        Assert.StartsWith("mongodb: dataset 'd': field 'f' of document x holds", ex.Message);
+        Assert.StartsWith("mongodb: dataset 'd': field 'f' of document ? holds", ex.Message);
         Assert.False(ex.IsTransient);
     }
 
@@ -232,9 +232,9 @@ public sealed class DocumentBatchBuilderTests
         Assert.Null(Convert(ColumnKind.Int64, BsonNull.Value));
         var plan = new ColumnPlan([ColumnSpec.Of("a.b", ColumnKind.Int64)]);
         var builder = new DocumentBatchBuilder(plan, BatchOptions.Default, "d", MongoRedactor.None);
-        Assert.Null(builder.Convert(plan.Columns[0], new BsonDocument("a", 5), "x"));
-        Assert.Null(builder.Convert(plan.Columns[0], [], "x"));
-        Assert.Equal(5L, builder.Convert(plan.Columns[0], new BsonDocument("a", new BsonDocument("b", 5)), "x"));
+        Assert.Null(builder.Convert(plan.Columns[0], new BsonDocument("a", 5)));
+        Assert.Null(builder.Convert(plan.Columns[0], []));
+        Assert.Equal(5L, builder.Convert(plan.Columns[0], new BsonDocument("a", new BsonDocument("b", 5))));
     }
 
     [Fact]

@@ -17,7 +17,10 @@ internal sealed record MongoDatasetConfig(
     public const int DefaultBatchSize = 1000;
     public const int MaxBatchSize = 100_000;
 
-    private static readonly string[] KnownKeys = ["collection", "filter", "fields", "sample_size", "batch_size"];
+    // "columns" is the engine's own: it stamps a dataset's declared columns: contract into the
+    // options of every spec, so a bounded-window dataset can type its cursor before the first read.
+    // The plan itself still comes from fields: or inference.
+    private static readonly string[] KnownKeys = ["collection", "filter", "fields", "sample_size", "batch_size", "columns"];
 
     public static MongoDatasetConfig? Parse(DatasetSpec spec, List<string> errors)
     {
@@ -25,7 +28,7 @@ internal sealed record MongoDatasetConfig(
         var prefix = $"dataset '{spec.Dataset}'";
         foreach (var key in spec.Options.Keys.Where(k => !KnownKeys.Contains(k, StringComparer.Ordinal)))
         {
-            errors.Add($"{prefix}: unknown read option '{key}'; known: {string.Join(", ", KnownKeys)}");
+            errors.Add($"{prefix}: unknown read option '{key}'; known: {string.Join(", ", KnownKeys.Where(k => k != "columns"))}");
         }
 
         var collection = spec.Dataset;
