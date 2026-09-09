@@ -84,6 +84,8 @@ public sealed class MongoConnectionConfigTests
     [InlineData(0)]
     [InlineData("soon")]
     [InlineData(-5.0)]
+    [InlineData(30.7)]
+    [InlineData(true)]
     public void Timeout_must_be_a_positive_integer(object raw)
     {
         Assert.Null(Parse(new() { ["uri"] = "mongodb://localhost", ["database"] = "d", ["timeout"] = raw }, out var errors));
@@ -206,6 +208,25 @@ public sealed class MongoDatasetConfigTests
         Assert.Null(Parse(new() { ["query"] = "x" }, out var errors));
         Assert.Contains(errors, e => e.StartsWith("dataset 'orders': unknown read option 'query'", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void Columns_option_from_the_engine_parses_with_no_error_and_is_not_listed_as_a_known_key()
+    {
+        var columns = new Dictionary<string, object?> { ["id"] = "bigint" };
+        var dataset = Parse(new() { ["columns"] = columns }, out var errors);
+        Assert.Empty(errors);
+        Assert.NotNull(dataset);
+
+        Assert.Null(Parse(new() { ["bogus"] = "x" }, out errors));
+        var message = Assert.Single(errors);
+        Assert.DoesNotContain("columns", message);
+    }
+
+    [Fact]
+    public void Dataset_config_schema_declares_columns()
+    {
+        Assert.Contains("\"columns\"", new MongoConnector().DatasetConfigSchema);
+    }
 }
 
 public sealed class MongoOutputConfigTests
@@ -276,5 +297,23 @@ public sealed class MongoOutputConfigTests
         var output = MongoOutputConfig.Parse(spec, errors)!;
         MongoOutputConfig.ValidateSchema(spec, output, Fixed, errors);
         Assert.Contains(errors, e => e.Contains("mode merge needs 'keys:'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_undeclared_object_ids_entry_missing_from_the_schema_is_reported_only_when_declared()
+    {
+        var schema = new Schema([new Field("id", Int64Type.Default, false)], null);
+
+        var declaredErrors = new List<string>();
+        var declaredSpec = Spec("append", new() { ["object_ids"] = new List<object?> { "nope" } });
+        var declaredOutput = MongoOutputConfig.Parse(declaredSpec, declaredErrors)!;
+        MongoOutputConfig.ValidateSchema(declaredSpec, declaredOutput, schema, declaredErrors);
+        Assert.Contains(declaredErrors, e => e.Contains("object_ids entry 'nope' is not a column of the pipeline's output", StringComparison.Ordinal));
+
+        var defaultErrors = new List<string>();
+        var defaultSpec = Spec("append");
+        var defaultOutput = MongoOutputConfig.Parse(defaultSpec, defaultErrors)!;
+        MongoOutputConfig.ValidateSchema(defaultSpec, defaultOutput, schema, defaultErrors);
+        Assert.DoesNotContain(defaultErrors, e => e.Contains("is not a column of the pipeline's output", StringComparison.Ordinal));
     }
 }

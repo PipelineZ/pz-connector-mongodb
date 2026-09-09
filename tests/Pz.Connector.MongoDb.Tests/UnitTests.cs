@@ -1,7 +1,11 @@
+using System.Net;
 using Apache.Arrow;
 using Apache.Arrow.Types;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MongoDB.Driver.Core.Clusters;
+using MongoDB.Driver.Core.Connections;
+using MongoDB.Driver.Core.Servers;
 using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.MongoDb.Tests;
@@ -139,6 +143,58 @@ public sealed class SchemaInferenceTests
         Assert.Equal(new BsonDocument { ["b.c"] = 1 }, projected.Projection());
         Assert.Same(plan, plan.Project(["nope"]));
     }
+
+    [Fact]
+    public void A_field_with_a_dot_in_its_own_name_is_refused_at_top_level_and_nested()
+    {
+        var topLevel = Assert.Throws<PzConnectorException>(() => Plan(new BsonDocument { ["_id"] = 1, ["a.b"] = 2 }));
+        Assert.Contains("has a dot in its own name", topLevel.Message);
+        Assert.Contains("document 1", topLevel.Message);
+        Assert.False(topLevel.IsTransient);
+
+        var nested = Assert.Throws<PzConnectorException>(
+            () => Plan(new BsonDocument { ["_id"] = 2, ["x"] = new BsonDocument { ["c.d"] = 1 } }));
+        Assert.Contains("has a dot in its own name", nested.Message);
+        Assert.Contains("document 2", nested.Message);
+    }
+
+    [Fact]
+    public void More_than_max_columns_distinct_fields_is_refused_during_sampling()
+    {
+        var document = new BsonDocument();
+        for (var i = 0; i <= ColumnPlan.MaxColumns; i++)
+        {
+            document[$"f{i}"] = i;
+        }
+
+        var ex = Assert.Throws<PzConnectorException>(() => Plan(document));
+        Assert.Contains("distinct field paths", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_names_ceiling_is_reported_alone_even_with_other_problems_present()
+    {
+        var names = new List<string> { "a", "a.b" };
+        names.AddRange(Enumerable.Range(0, ColumnPlan.MaxColumns - 1).Select(i => $"f{i}"));
+        Assert.Equal(ColumnPlan.MaxColumns + 1, names.Count);
+
+        var errors = new List<string>();
+        ColumnPlan.ValidateNames(names, "p", errors);
+        var error = Assert.Single(errors);
+        Assert.Contains($"{ColumnPlan.MaxColumns + 1} columns is more than the {ColumnPlan.MaxColumns}", error);
+    }
+
+    [Fact]
+    public void Prefix_check_is_linear_not_just_sorted_adjacent()
+    {
+        var errors = new List<string>();
+        ColumnPlan.ValidateNames(["a", "a-x", "a.b"], "p", errors);
+        Assert.Contains(errors, e => e.Contains("'a' is both a value and the parent of 'a.b'", StringComparison.Ordinal));
+
+        errors = new List<string>();
+        ColumnPlan.ValidateNames(["a.b.c", "a.b", "x"], "p", errors);
+        Assert.Contains(errors, e => e.Contains("'a.b' is both a value and the parent of 'a.b.c'", StringComparison.Ordinal));
+    }
 }
 
 public sealed class DocumentBatchBuilderTests
@@ -187,6 +243,17 @@ public sealed class DocumentBatchBuilderTests
     {
         var ex = Assert.Throws<PzConnectorException>(() => Convert(kind, BsonValue.Create(raw)));
         Assert.StartsWith("mongodb: dataset 'd': field 'f' of document ? holds", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public void A_double_at_the_int64_boundary_is_refused()
+    {
+        // 2^63 is exactly representable as a double but one past long.MaxValue; long.MaxValue
+        // itself is not exactly representable as a double (it rounds up to 2^63), so it is not
+        // asserted here at all.
+        var ex = Assert.Throws<PzConnectorException>(() => Convert(ColumnKind.Int64, 9223372036854775808.0));
+        Assert.Contains("holds 9.223372036854776E+18 where an integer is planned", ex.Message);
         Assert.False(ex.IsTransient);
     }
 
@@ -427,12 +494,58 @@ public sealed class MongoErrorsTests
     [InlineData(189, true)]
     [InlineData(10107, true)]
     [InlineData(43, true)]
+    [InlineData(64, true)]
     [InlineData(112, true)]
     public void Server_codes_classify(int code, bool transient)
     {
         var ex = MongoErrors.FromCode(code, "Name", "boom", MongoRedactor.None, "ctx");
         Assert.Equal(transient, ex.IsTransient);
         Assert.StartsWith($"mongodb: ctx: boom (code {code} Name", ex.Message);
+    }
+
+    [Fact]
+    public void Pool_paused_wait_queue_full_and_proxy_connection_are_transient()
+    {
+        var poolPaused = (PzConnectorException)MongoErrors.Wrap(new MongoConnectionPoolPausedException("pool paused"), MongoRedactor.None, "ctx");
+        Assert.True(poolPaused.IsTransient);
+
+        var waitQueueFull = (PzConnectorException)MongoErrors.Wrap(new MongoWaitQueueFullException("queue full"), MongoRedactor.None, "ctx");
+        Assert.True(waitQueueFull.IsTransient);
+
+        var proxy = (PzConnectorException)MongoErrors.Wrap(
+            new MongoDB.Driver.Core.MongoProxyConnectionException("proxy dropped", null), MongoRedactor.None, "ctx");
+        Assert.True(proxy.IsTransient);
+    }
+
+    [Fact]
+    public void Cursor_not_found_is_transient_with_code_43_a_plain_query_exception_is_not()
+    {
+        var connectionId = new ConnectionId(new ServerId(new ClusterId(1), new DnsEndPoint("h", 1)));
+
+        var cursor = (PzConnectorException)MongoErrors.Wrap(
+            new MongoCursorNotFoundException(connectionId, 123L, new BsonDocument()), MongoRedactor.None, "ctx");
+        Assert.True(cursor.IsTransient);
+        Assert.Contains("code 43", cursor.Message);
+
+        var query = (PzConnectorException)MongoErrors.Wrap(
+            new MongoQueryException(connectionId, "bad query", new BsonDocument(), null), MongoRedactor.None, "ctx");
+        Assert.False(query.IsTransient);
+    }
+
+    [Fact]
+    public void Write_concern_exception_classifies_by_code()
+    {
+        var connectionId = new ConnectionId(new ServerId(new ClusterId(1), new DnsEndPoint("h", 1)));
+
+        var duplicate = new MongoWriteConcernException(connectionId, "dup", new WriteConcernResult(new BsonDocument { ["ok"] = 1, ["code"] = 11000 }));
+        var wrappedDuplicate = (PzConnectorException)MongoErrors.Wrap(duplicate, MongoRedactor.None, "ctx");
+        Assert.False(wrappedDuplicate.IsTransient);
+        Assert.Contains("code 11000", wrappedDuplicate.Message);
+        Assert.Contains("unique index", wrappedDuplicate.Message);
+
+        var busy = new MongoWriteConcernException(connectionId, "busy", new WriteConcernResult(new BsonDocument { ["ok"] = 1, ["code"] = 64 }));
+        var wrappedBusy = (PzConnectorException)MongoErrors.Wrap(busy, MongoRedactor.None, "ctx");
+        Assert.True(wrappedBusy.IsTransient);
     }
 
     [Fact]
