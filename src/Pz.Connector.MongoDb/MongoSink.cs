@@ -58,11 +58,13 @@ internal sealed class MongoSink(
 
     /// <summary>The staging collection is created up front so an empty write still renames an
     /// empty collection over the output, and carries the output's own collection options
-    /// (collation, validator, capped bounds) and indexes, so the rename keeps the shape a reader
-    /// relies on -- a rename drops the target's options and indexes with the target, and a unique
-    /// index recreated under another collation would enforce something else. A view of the output
-    /// name is refused: a rename cannot replace one. A failure after the staging collection exists
-    /// drops it on the way out; nothing else would.</summary>
+    /// (collation, validator) and indexes, so the rename keeps the shape a reader relies on -- a
+    /// rename drops the target's options and indexes with the target, and a unique index recreated
+    /// under another collation would enforce something else. An existing output that a rename
+    /// cannot stand in for -- a view, a timeseries collection, or a capped collection, whose cap
+    /// would silently keep only its last <c>max</c> rows -- is refused before the staging
+    /// collection is even created. A failure after it exists drops it on the way out; nothing else
+    /// would.</summary>
     private async Task<MongoWriteSession> BeginReplaceAsync(OutputSpec spec, Schema schema, MongoOutputConfig output, CancellationToken ct)
     {
         var redactor = connection.Redactor;
@@ -77,9 +79,9 @@ internal sealed class MongoSink(
                 existing = await listed.FirstOrDefaultAsync(ct).ConfigureAwait(false);
             }
 
-            if (existing is not null && existing.TryGetValue("type", out var type) && type == "view")
+            if (existing is not null)
             {
-                throw MongoErrors.Fatal($"{context}: '{output.Collection}' is a view; replace renames a collection over the output, and a view cannot be replaced", redactor);
+                RefuseIfNotReplaceable(context, output.Collection, existing, redactor);
             }
 
             var create = new BsonDocument("create", staging);
@@ -102,14 +104,43 @@ internal sealed class MongoSink(
                 await CopyIndexesAsync(output.Collection, staging, ct).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException)
+        {
+            await DropQuietlyAsync(staging, spec.Output).ConfigureAwait(false);
+            throw;
+        }
         catch (Exception ex)
         {
             await DropQuietlyAsync(staging, spec.Output).ConfigureAwait(false);
-            throw ex is OperationCanceledException ? ex : MongoErrors.Wrap(ex, redactor, $"{context}: copying the indexes of '{output.Collection}' to '{staging}'");
+            throw MongoErrors.Wrap(ex, redactor, $"{context}: copying the indexes of '{output.Collection}' to '{staging}'");
         }
 
         logger.LogDebug("mongodb: output {Output}: replace stages into {Staging}", spec.Output, staging);
         return new MongoWriteSession(connection, _database, output, schema, [], staging, new ReplacePlan(output.Collection, staging), logger);
+    }
+
+    /// <summary>A rename can only stand in a plain collection over the output: a capped collection
+    /// would keep only its last <c>max</c> rows while every row still reports written, and a view
+    /// or timeseries collection cannot be the target of a rename at all.</summary>
+    private static void RefuseIfNotReplaceable(string context, string collection, BsonDocument existing, MongoRedactor redactor)
+    {
+        var capped = existing.TryGetValue("options", out var optionsValue) && optionsValue is BsonDocument options
+            && options.TryGetValue("capped", out var cappedValue) && cappedValue.IsBoolean && cappedValue.AsBoolean;
+        if (capped)
+        {
+            throw MongoErrors.Fatal(
+                $"{context}: '{collection}' is a capped collection; replace renames a plain collection over the output and a cap cannot hold exactly what was written -- use append, or drop the cap",
+                redactor);
+        }
+
+        if (existing.TryGetValue("type", out var typeValue) && typeValue.BsonType == BsonType.String && typeValue.AsString != "collection")
+        {
+            var type = typeValue.AsString;
+            var noun = type == "timeseries" ? "a timeseries collection" : $"a {type}";
+            throw MongoErrors.Fatal(
+                $"{context}: '{collection}' is {noun}; replace renames a collection over the output, and {noun} cannot be replaced",
+                redactor);
+        }
     }
 
     /// <summary>Every index of the output except the implicit <c>_id_</c>, recreated by spec on the

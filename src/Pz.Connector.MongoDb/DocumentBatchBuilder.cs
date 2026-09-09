@@ -55,7 +55,6 @@ internal sealed class DocumentBatchBuilder
 
     internal object? Convert(ColumnSpec column, BsonDocument document)
     {
-        var id = document;
         if (!TryGetPath(document, column.Path, out var value) || value.IsBsonNull || value.BsonType == BsonType.Undefined)
         {
             return null;
@@ -69,19 +68,19 @@ internal sealed class DocumentBatchBuilder
             {
                 BsonType.ObjectId => value.AsObjectId.ToString(),
                 BsonType.String => value.AsString,
-                _ => throw Refuse(column, id, $"holds {Describe(value)} where an ObjectId is planned"),
+                _ => throw Refuse(column, document, $"holds {Describe(value)} where an ObjectId is planned"),
             },
-            ColumnKind.Int32 => ToInt32(column, value, id),
-            ColumnKind.Int64 => ToInt64(column, value, id),
-            ColumnKind.Double => ToDouble(column, value, id),
-            ColumnKind.Decimal => ToDecimal(column, value, id),
+            ColumnKind.Int32 => ToInt32(column, value, document),
+            ColumnKind.Int64 => ToInt64(column, value, document),
+            ColumnKind.Double => ToDouble(column, value, document),
+            ColumnKind.Decimal => ToDecimal(column, value, document),
             ColumnKind.Boolean => value.BsonType == BsonType.Boolean
                 ? value.AsBoolean
-                : throw Refuse(column, id, $"holds {Describe(value)} where a boolean is planned"),
-            ColumnKind.Timestamp => ToTimestamp(column, value, id),
+                : throw Refuse(column, document, $"holds {Describe(value)} where a boolean is planned"),
+            ColumnKind.Timestamp => ToTimestamp(column, value, document),
             ColumnKind.Date => value.BsonType == BsonType.DateTime
-                ? DateOnly.FromDateTime(ToTimestamp(column, value, id).UtcDateTime)
-                : throw Refuse(column, id, $"holds {Describe(value)} where a date is planned"),
+                ? DateOnly.FromDateTime(ToTimestamp(column, value, document).UtcDateTime)
+                : throw Refuse(column, document, $"holds {Describe(value)} where a date is planned"),
             _ => throw new InvalidOperationException($"unexpected column kind {column.Kind}"),
         };
     }
@@ -124,18 +123,18 @@ internal sealed class DocumentBatchBuilder
         _ => MongoSerialization.ToCanonicalJson(value),
     };
 
-    private int ToInt32(ColumnSpec column, BsonValue value, BsonDocument id)
+    private int ToInt32(ColumnSpec column, BsonValue value, BsonDocument document)
     {
-        var l = ToInt64(column, value, id);
+        var l = ToInt64(column, value, document);
         if (l is < int.MinValue or > int.MaxValue)
         {
-            throw Refuse(column, id, $"holds {l}, outside the planned 32-bit range");
+            throw Refuse(column, document, $"holds {l}, outside the planned 32-bit range");
         }
 
         return (int)l;
     }
 
-    private long ToInt64(ColumnSpec column, BsonValue value, BsonDocument id)
+    private long ToInt64(ColumnSpec column, BsonValue value, BsonDocument document)
     {
         switch (value.BsonType)
         {
@@ -161,19 +160,19 @@ internal sealed class DocumentBatchBuilder
                 break;
         }
 
-        throw Refuse(column, id, $"holds {Describe(value)} where an integer is planned");
+        throw Refuse(column, document, $"holds {Describe(value)} where an integer is planned");
     }
 
-    private double ToDouble(ColumnSpec column, BsonValue value, BsonDocument id) => value.BsonType switch
+    private double ToDouble(ColumnSpec column, BsonValue value, BsonDocument document) => value.BsonType switch
     {
         BsonType.Int32 => value.AsInt32,
         BsonType.Int64 => value.AsInt64,
         BsonType.Double => value.AsDouble,
         BsonType.Decimal128 => Decimal128.ToDouble(value.AsDecimal128),
-        _ => throw Refuse(column, id, $"holds {Describe(value)} where a double is planned"),
+        _ => throw Refuse(column, document, $"holds {Describe(value)} where a double is planned"),
     };
 
-    private decimal ToDecimal(ColumnSpec column, BsonValue value, BsonDocument id)
+    private decimal ToDecimal(ColumnSpec column, BsonValue value, BsonDocument document)
     {
         decimal result;
         switch (value.BsonType)
@@ -188,7 +187,7 @@ internal sealed class DocumentBatchBuilder
                 var d = value.AsDouble;
                 if (!double.IsFinite(d) || d is < -7.9e28 or > 7.9e28)
                 {
-                    throw Refuse(column, id, $"holds {Describe(value)}, which a decimal cannot hold");
+                    throw Refuse(column, document, $"holds {Describe(value)}, which a decimal cannot hold");
                 }
 
                 result = (decimal)d;
@@ -196,12 +195,12 @@ internal sealed class DocumentBatchBuilder
             case BsonType.Decimal128:
                 if (!TryToDecimal(value.AsDecimal128, out result))
                 {
-                    throw Refuse(column, id, $"holds {Describe(value)}, outside the planned decimal({ColumnPlan.DecimalPrecision},{ColumnPlan.DecimalScale}) range");
+                    throw Refuse(column, document, $"holds {Describe(value)}, outside the planned decimal({ColumnPlan.DecimalPrecision},{ColumnPlan.DecimalScale}) range");
                 }
 
                 break;
             default:
-                throw Refuse(column, id, $"holds {Describe(value)} where a decimal is planned");
+                throw Refuse(column, document, $"holds {Describe(value)} where a decimal is planned");
         }
 
         if (result.Scale > ColumnPlan.DecimalScale)
@@ -209,7 +208,7 @@ internal sealed class DocumentBatchBuilder
             var truncated = decimal.Truncate(result * DecimalScaleFactor) / DecimalScaleFactor;
             if (truncated != result)
             {
-                throw Refuse(column, id, $"holds {Describe(value)}, more than {ColumnPlan.DecimalScale} fraction digits; declare the field as string or double under fields:");
+                throw Refuse(column, document, $"holds {Describe(value)}, more than {ColumnPlan.DecimalScale} fraction digits; declare the field as string or double under fields:");
             }
 
             result = truncated;
@@ -218,11 +217,11 @@ internal sealed class DocumentBatchBuilder
         return result;
     }
 
-    private DateTimeOffset ToTimestamp(ColumnSpec column, BsonValue value, BsonDocument id)
+    private DateTimeOffset ToTimestamp(ColumnSpec column, BsonValue value, BsonDocument document)
     {
         if (value.BsonType != BsonType.DateTime)
         {
-            throw Refuse(column, id, $"holds {Describe(value)} where a timestamp is planned");
+            throw Refuse(column, document, $"holds {Describe(value)} where a timestamp is planned");
         }
 
         try
@@ -231,7 +230,7 @@ internal sealed class DocumentBatchBuilder
         }
         catch (ArgumentOutOfRangeException)
         {
-            throw Refuse(column, id, $"holds {Describe(value)}, outside the timestamp range");
+            throw Refuse(column, document, $"holds {Describe(value)}, outside the timestamp range");
         }
     }
 

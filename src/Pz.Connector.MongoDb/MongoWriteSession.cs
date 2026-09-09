@@ -11,9 +11,9 @@ namespace Pz.Connector.MongoDb;
 /// upserting <c>replaceOne</c>s for merge), commit flushes the rest and for a replace renames the
 /// staging collection over the output. Ordered bulks are what make a duplicate key inside one
 /// session resolve last-writer-wins, and what make the first rejected document the one reported.
-/// A replace commit that fails -- the flush or the rename -- drops its staging collection instead
-/// of renaming it: the session is already committed at that point, so <see cref="AbortAsync"/> can
-/// no longer run, and nothing else would.</summary>
+/// A replace commit that fails or is cancelled -- the flush or the rename -- drops its staging
+/// collection instead of renaming it: the session is already committed at that point, so
+/// <see cref="AbortAsync"/> can no longer run, and nothing else would.</summary>
 internal sealed class MongoWriteSession : ISinkWriteSession
 {
     private readonly MongoRedactor _redactor;
@@ -87,10 +87,11 @@ internal sealed class MongoWriteSession : ISinkWriteSession
                 await FlushAsync(ct).ConfigureAwait(false);
                 await RenameAsync(replace, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception)
             {
                 // _committed is already true, so AbortAsync can no longer run -- this is the last
-                // chance to drop the staging collection rather than orphan it forever.
+                // chance to drop the staging collection rather than orphan it forever, whether the
+                // commit failed or was cancelled.
                 await DropStagingAfterFailedCommitAsync(replace).ConfigureAwait(false);
                 throw;
             }
@@ -206,7 +207,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
     /// <summary>One <c>renameCollection</c> with <c>dropTarget</c>: the server swaps the namespaces
     /// atomically, so readers see the old collection or the new one, never a mix. A failure here
     /// leaves the output untouched -- the swap never happened -- and it is <see cref="CommitAsync"/>,
-    /// the only caller, that drops the staging collection this throws out of.</summary>
+    /// the only caller, that catches what this throws and drops the staging collection.</summary>
     private async Task RenameAsync(ReplacePlan replace, CancellationToken ct)
     {
         try
@@ -217,7 +218,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw MongoErrors.Wrap(ex, _redactor,
-                $"output '{_output.Collection}': renaming '{replace.Staging}' over '{replace.Collection}' (the staging collection holds the full write)");
+                $"output '{_output.Collection}': renaming '{replace.Staging}' over '{replace.Collection}' (the staged write was discarded; the output is untouched; re-run the node)");
         }
     }
 
