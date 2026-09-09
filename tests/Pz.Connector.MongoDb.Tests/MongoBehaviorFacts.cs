@@ -320,6 +320,22 @@ public sealed class MongoBehaviorFacts
     }
 
     [SkippableFact]
+    public async Task Replace_refuses_a_capped_collection()
+    {
+        var target = MongoFixture.NewName("capped");
+        await _mongo.Db.CreateCollectionAsync(target, new CreateCollectionOptions { Capped = true, MaxSize = 4096, MaxDocuments = 3 });
+        ISinkConnector connector = new MongoConnector();
+        await using var sink = await connector.OpenAsync(Config, CancellationToken.None);
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () => await sink.BeginWriteAsync(Output(target, "replace"), IdName, CancellationToken.None));
+        Assert.Contains("capped", ex.Message);
+        Assert.False(ex.IsTransient);
+
+        // Refused before the staging collection is even created -- nothing is left to drop.
+        using var names = await _mongo.Db.ListCollectionNamesAsync();
+        Assert.DoesNotContain(await names.ToListAsync(), n => n.StartsWith(target + ".pz_", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
     public async Task Duplicate_key_on_append_is_non_transient_with_a_hint()
     {
         var target = MongoFixture.NewName("dup");
@@ -463,13 +479,21 @@ public sealed class MongoBehaviorFacts
 
         ISinkConnector connector = new MongoConnector();
         await using var sink = await connector.OpenAsync(Config, CancellationToken.None);
-        var session = await sink.BeginWriteAsync(Output(target, "replace"), nameOnly, CancellationToken.None);
-        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        await using var session = await sink.BeginWriteAsync(Output(target, "replace"), nameOnly, CancellationToken.None);
+        PzConnectorException ex;
+        try
         {
-            await session.WriteBatchAsync(badBatch, CancellationToken.None);
+            ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+            {
+                await session.WriteBatchAsync(badBatch, CancellationToken.None);
+                await session.CommitAsync(CancellationToken.None);
+            });
+        }
+        finally
+        {
             badBatch.Dispose();
-            await session.CommitAsync(CancellationToken.None);
-        });
+        }
+
         Assert.False(ex.IsTransient);
 
         using var namesAfterFailedCommit = await _mongo.Db.ListCollectionNamesAsync();
@@ -517,6 +541,7 @@ public sealed class MongoBehaviorFacts
             }
 
             Assert.True(caught.IsTransient);
+            Assert.Contains("code 43", caught.Message, StringComparison.Ordinal);
         }
         finally
         {
