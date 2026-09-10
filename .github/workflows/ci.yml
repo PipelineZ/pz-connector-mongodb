@@ -89,7 +89,7 @@ jobs:
           MONGO_URI: mongodb://root:e2e-secret@localhost:27017/?authSource=admin
         run: |
           set -euo pipefail
-          dotnet tool install --global pz --version 0.6.0
+          dotnet tool install --global pz --version 0.6.1
           cd tests/e2e
           sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
           pz restore --feeds "${GITHUB_WORKSPACE}/packages"
