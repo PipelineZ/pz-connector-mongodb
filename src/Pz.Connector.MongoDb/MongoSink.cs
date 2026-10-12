@@ -71,8 +71,10 @@ internal sealed class MongoSink(
         var context = $"output '{spec.Output}'";
         var staging = StagingName(output.Collection);
         BsonDocument? existing;
+        var stats = ConnectorStats.Current;
         try
         {
+            stats.AddRequests(1);
             using (var listed = await _database.ListCollectionsAsync(
                        new ListCollectionsOptions { Filter = new BsonDocument("name", output.Collection) }, ct).ConfigureAwait(false))
             {
@@ -90,6 +92,7 @@ internal sealed class MongoSink(
                 create.AddRange(optionDocument);
             }
 
+            stats.AddRequests(1);
             await _database.RunCommandAsync<BsonDocument>(create, null, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -149,6 +152,7 @@ internal sealed class MongoSink(
     private async Task CopyIndexesAsync(string from, string to, CancellationToken ct)
     {
         var specs = new BsonArray();
+        ConnectorStats.Current.AddRequests(1);
         using (var indexes = await _database.GetCollection<BsonDocument>(from).Indexes.ListAsync(ct).ConfigureAwait(false))
         {
             while (await indexes.MoveNextAsync(ct).ConfigureAwait(false))
@@ -174,6 +178,7 @@ internal sealed class MongoSink(
             return;
         }
 
+        ConnectorStats.Current.AddRequests(1);
         await _database.RunCommandAsync<BsonDocument>(new BsonDocument { ["createIndexes"] = to, ["indexes"] = specs }, null, ct).ConfigureAwait(false);
     }
 
@@ -182,6 +187,7 @@ internal sealed class MongoSink(
     private async Task DropQuietlyAsync(string staging, string output)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        ConnectorStats.Current.AddRequests(1);
         try
         {
             await _database.DropCollectionAsync(staging, cts.Token).ConfigureAwait(false);

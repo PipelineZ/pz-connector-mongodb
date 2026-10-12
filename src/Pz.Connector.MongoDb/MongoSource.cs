@@ -90,6 +90,7 @@ internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient 
         var context = $"dataset '{spec.Dataset}'";
         var collection = _database.GetCollection<BsonDocument>(dataset.Collection);
         var inference = new SchemaInference(spec.Dataset, redactor);
+        var stats = ConnectorStats.Current;
         try
         {
             var options = new FindOptions<BsonDocument>
@@ -99,8 +100,15 @@ internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient 
                 BatchSize = Math.Min(dataset.BatchSize, dataset.SampleSize),
             };
             using var cursor = await collection.FindAsync(dataset.Filter ?? [], options, ct).ConfigureAwait(false);
+            stats.AddRequests(1);
+            var pages = 0;
             while (await cursor.MoveNextAsync(ct).ConfigureAwait(false))
             {
+                if (pages++ > 0)
+                {
+                    stats.AddRequests(1);
+                }
+
                 foreach (var document in cursor.Current)
                 {
                     inference.Observe(document);
@@ -130,6 +138,7 @@ internal sealed class MongoSource(MongoConnectionConfig connection, MongoClient 
         try
         {
             var options = new ListCollectionNamesOptions { Filter = new BsonDocument("name", name) };
+            ConnectorStats.Current.AddRequests(1);
             using var names = await _database.ListCollectionNamesAsync(options, ct).ConfigureAwait(false);
             return await names.AnyAsync(ct).ConfigureAwait(false);
         }

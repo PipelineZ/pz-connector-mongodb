@@ -96,6 +96,11 @@ jobs:
           PKG_DIR=".pz/packages/Pz.Connector.MongoDb/${PKG_VERSION}"
           test -f "${PKG_DIR}/native/Pz.Connector.MongoDb"
           pz run
+          # Both mongodb nodes report remote stats: the read and the write. Assert the exact node
+          # count so a node that stops reporting cannot pass vacuously.
+          run_dir="$(ls -td .pz/runs/*/ | head -n1)"
+          jq -e '[.nodes[] | select(.connector=="mongodb")] | (length == 2) and (map(.remote.requests > 0) | all)' \
+            "${run_dir}run_results.json"
           # Three documents in, three documents out: the nested city flattened on the way in and
           # written back as a plain field, the array carried as JSON text, the ObjectId as hex.
           docker exec mongo mongosh --quiet -u root -p e2e-secret --authenticationDatabase admin e2e --eval 'db.orders_out.find({}, {_id: 0}).sort({id: 1}).toArray()' | tee out.txt

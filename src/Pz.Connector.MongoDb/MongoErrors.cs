@@ -41,6 +41,10 @@ internal static class MongoErrors
 
     public const int DuplicateKey = 11000;
 
+    /// <summary>The code Azure Cosmos DB's MongoDB API answers with when a request exceeds its
+    /// provisioned throughput.</summary>
+    public const int RateLimited = 16500;
+
     public static bool IsTransientCode(int code) => TransientCodes.Contains(code);
 
     /// <summary>Classifies and wraps any exception raised by a driver call. Cancellation is not a
@@ -99,6 +103,11 @@ internal static class MongoErrors
     public static PzConnectorException FromCode(int code, string? codeName, string? message, MongoRedactor redactor, string context,
         Exception? original = null)
     {
+        if (code == RateLimited)
+        {
+            ConnectorStats.Current.AddThrottled(1);
+        }
+
         var hint = code switch
         {
             13 => "; the user lacks a role for this operation",
@@ -152,6 +161,11 @@ internal static class MongoErrors
             return writeConcern
                 ? Transient($"{context}: write concern not satisfied: {original.Message}", redactor, original)
                 : Fatal($"{context}: {original.Message}", redactor, original);
+        }
+
+        if (code == RateLimited)
+        {
+            ConnectorStats.Current.AddThrottled(1);
         }
 
         var hint = code == DuplicateKey ? "; a unique index on the collection rejects the row, use merge with that key or drop the duplicate" : "";
