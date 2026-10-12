@@ -58,10 +58,17 @@ public sealed class MongoSinkAcceptance : SinkConnectorAcceptanceTests
         foreach (var doc in docs)
         {
             ids.Append(doc["id"].ToInt64());
-            names.Append(doc["name"].AsString);
+            if (doc.TryGetValue("name", out var name) && !name.IsBsonNull)
+            {
+                names.Append(name.AsString);
+            }
+            else
+            {
+                names.AppendNull();
+            }
         }
 
-        var schema = new Schema([new Field("id", Int64Type.Default, false), new Field("name", StringType.Default, false)], null);
+        var schema = new Schema([new Field("id", Int64Type.Default, false), new Field("name", StringType.Default, true)], null);
         return [new RecordBatch(schema, [ids.Build(), names.Build()], docs.Count)];
     }
 }
