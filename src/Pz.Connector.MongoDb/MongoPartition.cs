@@ -22,12 +22,22 @@ internal sealed class MongoPartition(
         var context = $"dataset '{spec.Dataset}': reading '{dataset.Collection}'";
         var builder = new DocumentBatchBuilder(plan, options, spec.Dataset, connection.Redactor);
         var findOptions = new FindOptions<BsonDocument> { Projection = plan.Projection(), BatchSize = dataset.BatchSize };
-        using var cursor = await OpenAsync(findOptions, context, ct).ConfigureAwait(false);
+        // Captured here: the ambient handle is only visible on the operation's own async flow.
+        var stats = ConnectorStats.Current;
+        using var cursor = await OpenAsync(findOptions, stats, context, ct).ConfigureAwait(false);
         var pages = 0L;
         var rows = 0L;
         while (await MoveNextAsync(cursor, context, ct).ConfigureAwait(false))
         {
-            pages++;
+            // The first page arrives with the find reply; every later one is a getMore round trip.
+            // A final getMore that returns nothing is not counted: the driver does not say whether
+            // that call reached the server or found the cursor already exhausted.
+            if (pages++ > 0)
+            {
+                stats.AddRequests(1);
+                stats.AddExtra("mongodb.get_mores", 1);
+            }
+
             foreach (var document in cursor.Current)
             {
                 builder.Append(document);
@@ -44,10 +54,11 @@ internal sealed class MongoPartition(
             yield return tail;
         }
 
+        stats.AddExtra("mongodb.documents", rows);
         logger.LogDebug("mongodb: dataset {Dataset}: {Rows} documents in {Pages} server batches", spec.Dataset, rows, pages);
     }
 
-    private async Task<IAsyncCursor<BsonDocument>> OpenAsync(FindOptions<BsonDocument> options, string context, CancellationToken ct)
+    private async Task<IAsyncCursor<BsonDocument>> OpenAsync(FindOptions<BsonDocument> options, IConnectorStats stats, string context, CancellationToken ct)
     {
         try
         {
@@ -56,6 +67,10 @@ internal sealed class MongoPartition(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw MongoErrors.Wrap(ex, connection.Redactor, context);
+        }
+        finally
+        {
+            stats.AddRequests(1);
         }
     }
 

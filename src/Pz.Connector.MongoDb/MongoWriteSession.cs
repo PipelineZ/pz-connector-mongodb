@@ -113,6 +113,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
     private async Task DropStagingAfterFailedCommitAsync(ReplacePlan replace)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        ConnectorStats.Current.AddRequests(1);
         try
         {
             await _database.DropCollectionAsync(replace.Staging, cts.Token).ConfigureAwait(false);
@@ -140,6 +141,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
             // whole cleanup. A failure here leaves an orphan the operator can drop, not a wrong result.
             try
             {
+                ConnectorStats.Current.AddRequests(1);
                 await _database.DropCollectionAsync(replace.Staging, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -180,6 +182,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
         }
 
         var context = $"output '{_output.Collection}': writing {count} document(s) into '{TargetCollection}'";
+        var stats = ConnectorStats.Current;
         try
         {
             if (_models.Count > 0)
@@ -199,8 +202,12 @@ internal sealed class MongoWriteSession : ISinkWriteSession
         {
             _documents.Clear();
             _models.Clear();
+            // One call is one request even when the driver splits it into several commands at its
+            // size limits, and a rejected call still reached the server.
+            stats.AddRequests(1);
         }
 
+        stats.AddExtra("mongodb.documents", count);
         _requests++;
     }
 
@@ -212,6 +219,7 @@ internal sealed class MongoWriteSession : ISinkWriteSession
     {
         try
         {
+            ConnectorStats.Current.AddRequests(1);
             await _database.RenameCollectionAsync(replace.Staging, replace.Collection, new RenameCollectionOptions { DropTarget = true }, ct)
                 .ConfigureAwait(false);
         }

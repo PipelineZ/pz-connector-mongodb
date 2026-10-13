@@ -36,7 +36,7 @@ public sealed class MongoConnector : IConnector, ISourceConnector, ISinkConnecto
 
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.BoundedWindow | ConnectorCapabilities.InclusiveWatermarkBound
-        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReplaceWrites;
+        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.ReportsStats;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["uri"], "properties": {
@@ -93,6 +93,7 @@ public sealed class MongoConnector : IConnector, ISourceConnector, ISinkConnecto
         {
             using var client = MongoClientFactory.Create(connection);
             var database = client.GetDatabase(connection.Database);
+            ConnectorStats.Current.AddRequests(2);
             // ping proves the credentials against the auth source; buildInfo names the server.
             await database.RunCommandAsync<BsonDocument>(new BsonDocument("ping", 1), null, ct).ConfigureAwait(false);
             var info = await database.RunCommandAsync<BsonDocument>(new BsonDocument("buildInfo", 1), null, ct).ConfigureAwait(false);

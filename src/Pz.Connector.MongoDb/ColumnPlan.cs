@@ -46,9 +46,10 @@ internal sealed class ColumnPlan
         return projection;
     }
 
-    /// <summary>Narrows to the named columns, in this plan's own order. A name this plan does not
-    /// have means the hint is unusable, and the full plan is returned -- the engine then drops the
-    /// hint the same way and the pipeline's SQL reports the unknown column.</summary>
+    /// <summary>Narrows to the named columns, in the order the hint names them: the batches the
+    /// engine receives must carry exactly the requested columns in that order. A name this plan
+    /// does not have means the hint is unusable, and the full plan is returned -- the engine then
+    /// drops the hint the same way and the pipeline's SQL reports the unknown column.</summary>
     public ColumnPlan Project(IReadOnlyList<string>? columns)
     {
         if (columns is not { Count: > 0 })
@@ -56,9 +57,28 @@ internal sealed class ColumnPlan
             return this;
         }
 
-        var wanted = new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
-        var kept = Columns.Where(c => wanted.Contains(c.Name)).ToList();
-        return kept.Count == wanted.Count ? new ColumnPlan(kept) : this;
+        var byName = new Dictionary<string, ColumnSpec>(StringComparer.OrdinalIgnoreCase);
+        foreach (var column in Columns)
+        {
+            byName.TryAdd(column.Name, column);
+        }
+
+        var kept = new List<ColumnSpec>(columns.Count);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in columns)
+        {
+            if (!byName.TryGetValue(name, out var column))
+            {
+                return this;
+            }
+
+            if (seen.Add(name))
+            {
+                kept.Add(column);
+            }
+        }
+
+        return new ColumnPlan(kept);
     }
 
     public static IArrowType ArrowType(ColumnKind kind) => kind switch
