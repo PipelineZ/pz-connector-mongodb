@@ -119,6 +119,13 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
             {
                 errors.Add($"{prefix}: key column '{key}' is not in the pipeline's output");
             }
+
+            // The upsert filter matches each key column's value as-is: a sub-document there would be read as a
+            // query, its field names (data from the staged rows) as operators such as $gt or $where.
+            foreach (var field in schema.FieldsList.Where(f => spec.Keys.Contains(f.Name) && f.DataType is Apache.Arrow.Types.NestedType))
+            {
+                errors.Add($"{prefix}: key column '{field.Name}' is a struct, list or map; a merge key must be a flat value -- key on a flat column, or extract one in the pipeline (e.g. {field.Name}.id)");
+            }
         }
     }
 }
