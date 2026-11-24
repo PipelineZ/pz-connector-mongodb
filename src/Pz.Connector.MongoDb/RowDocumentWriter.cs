@@ -2,6 +2,7 @@ using System.Data.SqlTypes;
 using System.Globalization;
 using Apache.Arrow;
 using MongoDB.Bson;
+using Pz.Connectors.Abstractions;
 using Pz.Connectors.Abstractions.Batches;
 
 namespace Pz.Connector.MongoDb;
@@ -100,6 +101,14 @@ internal sealed class RowDocumentWriter
         var document = new BsonDocument();
         foreach (var (name, member) in members)
         {
+            // Setting a name twice would silently keep only the last value.
+            if (document.Contains(name))
+            {
+                throw new PzConnectorException(
+                    "a map holds two entries whose keys have the same text, which a document cannot hold -- make the keys distinct in the pipeline",
+                    isTransient: false);
+            }
+
             document[name] = FromBoxed(member);
         }
 
