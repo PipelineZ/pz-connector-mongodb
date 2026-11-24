@@ -1,5 +1,9 @@
+using System.Data.SqlTypes;
+using System.Globalization;
 using Apache.Arrow;
 using MongoDB.Bson;
+using Pz.Connectors.Abstractions;
+using Pz.Connectors.Abstractions.Batches;
 
 namespace Pz.Connector.MongoDb;
 
@@ -67,9 +71,59 @@ internal sealed class RowDocumentWriter
             Date32Array a => new BsonDateTime(new DateTimeOffset(a.GetDateOnly(row)!.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToUnixTimeMilliseconds()),
             TimestampArray a => new BsonDateTime(a.GetTimestamp(row)!.Value.ToUnixTimeMilliseconds()),
             StringArray a => Text(a.GetString(row)!, asObjectId),
+            StructArray or ListArray or FixedSizeListArray or MapArray => FromBoxed(ArrowCell.GetValue(column, row)),
             _ => throw new NotSupportedException($"column type {column.Data.DataType.TypeId} is outside pz's type matrix"),
         };
     }
+
+    /// <summary>A nested cell as BSON: a struct is a sub-document, a list an array, a map a
+    /// sub-document keyed by the key's text. Leaves take the spelling flat columns get.</summary>
+    private static BsonValue FromBoxed(object? value) => value switch
+    {
+        null => BsonNull.Value,
+        int i => new BsonInt32(i),
+        long l => new BsonInt64(l),
+        double d => new BsonDouble(d),
+        bool b => new BsonBoolean(b),
+        string t => new BsonString(t),
+        decimal m => new BsonDecimal128(Decimal128.Parse(m.ToString(CultureInfo.InvariantCulture))),
+        SqlDecimal m => new BsonDecimal128(Decimal128.Parse(m.ToString())),
+        DateOnly d => new BsonDateTime(new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToUnixTimeMilliseconds()),
+        DateTimeOffset t => new BsonDateTime(t.ToUnixTimeMilliseconds()),
+        Dictionary<string, object?> fields => Document(fields.Select(f => KeyValuePair.Create(f.Key, f.Value))),
+        List<KeyValuePair<object, object?>> entries => Document(entries.Select(e => KeyValuePair.Create(KeyText(e.Key), e.Value))),
+        List<object?> items => new BsonArray(items.Select(FromBoxed)),
+        _ => throw new NotSupportedException($"nested value of type {value.GetType().Name} is outside pz's type matrix"),
+    };
+
+    private static BsonDocument Document(IEnumerable<KeyValuePair<string, object?>> members)
+    {
+        var document = new BsonDocument();
+        foreach (var (name, member) in members)
+        {
+            // Setting a name twice would silently keep only the last value.
+            if (document.Contains(name))
+            {
+                throw new PzConnectorException(
+                    "a map holds two entries whose keys have the same text, which a document cannot hold -- make the keys distinct in the pipeline",
+                    isTransient: false);
+            }
+
+            document[name] = FromBoxed(member);
+        }
+
+        return document;
+    }
+
+    private static string KeyText(object key) => key switch
+    {
+        string t => t,
+        bool b => b ? "true" : "false",
+        DateOnly d => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        DateTimeOffset t => t.ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture),
+        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+        _ => key.ToString()!,
+    };
 
     private static BsonValue Text(string text, bool asObjectId) =>
         asObjectId && text.Length == 24 && ObjectId.TryParse(text, out var id) ? new BsonObjectId(id) : new BsonString(text);

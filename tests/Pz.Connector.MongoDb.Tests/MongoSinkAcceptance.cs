@@ -16,6 +16,7 @@ public sealed class MongoSinkAcceptance : SinkConnectorAcceptanceTests
 {
     private readonly MongoFixture _mongo;
     private readonly string _append = MongoFixture.NewName("append");
+    private readonly string _nested = MongoFixture.NewName("nested");
     private readonly string _merge = MongoFixture.NewName("merge");
     private readonly string _replace = MongoFixture.NewName("replace");
 
@@ -32,6 +33,9 @@ public sealed class MongoSinkAcceptance : SinkConnectorAcceptanceTests
     protected override ConnectorConfig ValidConfig => new(_mongo.ConnectionConfig());
 
     protected override OutputSpec SmallOutput => new("mongodb", _append, "append", "fail_on_change", new Dictionary<string, object?>());
+
+    protected override OutputSpec? NestedOutput =>
+        new("mongodb", _nested, "append", "fail_on_change", new Dictionary<string, object?>());
 
     protected override OutputSpec? MergeOutput =>
         new OutputSpec("mongodb", _merge, "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id"] };

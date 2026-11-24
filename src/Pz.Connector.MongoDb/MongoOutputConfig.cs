@@ -64,15 +64,25 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
     /// <summary>Every column must be spellable as BSON and nameable as a field, a merge output's keys
     /// must be present columns (the filter is built from them), and an <c>object_ids</c> entry that
     /// names a present column must name a text one.</summary>
+    /// <summary>A flat type the writer spells, or a struct, list or map whose every leaf is one.</summary>
+    private static bool IsDocumentType(IArrowType type) => type switch
+    {
+        StructType s => s.Fields.All(f => IsDocumentType(f.DataType)),
+        ListType l => IsDocumentType(l.ValueDataType),
+        FixedSizeListType l => IsDocumentType(l.ValueDataType),
+        MapType m => IsDocumentType(m.KeyField.DataType) && IsDocumentType(m.ValueField.DataType),
+        _ => DocumentTypes.Contains(type.TypeId),
+    };
+
     public static void ValidateSchema(OutputSpec spec, MongoOutputConfig output, Schema schema, List<string> errors)
     {
         var prefix = $"output '{spec.Output}'";
         foreach (var field in schema.FieldsList)
         {
-            if (!DocumentTypes.Contains(field.DataType.TypeId))
+            if (!IsDocumentType(field.DataType))
             {
                 errors.Add($"{prefix}: column '{field.Name}' is {field.DataType.TypeId}, which a BSON document cannot carry; "
-                    + $"allowed: {string.Join(", ", DocumentTypes)}. Drop it from the pipeline's projection or cast it");
+                    + $"allowed: {string.Join(", ", DocumentTypes)}. Nested struct, list and map columns are allowed when every leaf is one of these. Drop it from the pipeline's projection or cast it");
             }
 
             if (field.Name.Length == 0 || field.Name.Split('.').Any(s => s.Length == 0 || s.StartsWith('$')))
@@ -108,6 +118,13 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
             foreach (var key in spec.Keys.Where(k => schema.FieldsList.All(f => f.Name != k)))
             {
                 errors.Add($"{prefix}: key column '{key}' is not in the pipeline's output");
+            }
+
+            // The upsert filter matches each key column's value as-is: a sub-document there would be read as a
+            // query, its field names (data from the staged rows) as operators such as $gt or $where.
+            foreach (var field in schema.FieldsList.Where(f => spec.Keys.Contains(f.Name) && f.DataType is Apache.Arrow.Types.NestedType))
+            {
+                errors.Add($"{prefix}: key column '{field.Name}' is a struct, list or map; a merge key must be a flat value -- key on a flat column, or extract one in the pipeline (e.g. {field.Name}.id)");
             }
         }
     }

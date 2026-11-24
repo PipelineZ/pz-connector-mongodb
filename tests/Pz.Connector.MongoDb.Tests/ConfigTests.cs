@@ -290,6 +290,21 @@ public sealed class MongoOutputConfigTests
     }
 
     [Fact]
+    public void A_nested_merge_key_is_refused_so_its_field_names_never_reach_the_filter()
+    {
+        var schema = new Schema(
+        [
+            new Field("id", Int64Type.Default, false),
+            new Field("ref", new StructType([new Field("$gt", StringType.Default, true)]), true),
+        ], null);
+        var errors = new List<string>();
+        var spec = Spec("merge", new(), "id", "ref");
+        var output = MongoOutputConfig.Parse(spec, errors)!;
+        MongoOutputConfig.ValidateSchema(spec, output, schema, errors);
+        Assert.Contains(errors, e => e.Contains("key column 'ref' is a struct, list or map; a merge key must be a flat value", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Merge_needs_keys()
     {
         var errors = new List<string>();

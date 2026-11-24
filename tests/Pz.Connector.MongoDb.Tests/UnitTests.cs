@@ -622,6 +622,7 @@ public sealed class MongoConnectorTests
         Assert.True(connector.Capabilities.HasFlag(ConnectorCapabilities.InclusiveWatermarkBound));
         Assert.True(connector.Capabilities.HasFlag(ConnectorCapabilities.Merge));
         Assert.True(connector.Capabilities.HasFlag(ConnectorCapabilities.ReplaceWrites));
+        Assert.True(connector.Capabilities.HasFlag(ConnectorCapabilities.NestedTypes));
         Assert.False(connector.Capabilities.HasFlag(ConnectorCapabilities.NativeScan));
     }
 
