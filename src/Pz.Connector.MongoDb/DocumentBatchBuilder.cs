@@ -1,8 +1,10 @@
 using System.Globalization;
 using Apache.Arrow;
+using Apache.Arrow.Types;
 using MongoDB.Bson;
 using Pz.Connectors.Abstractions;
 using Pz.Connectors.Abstractions.Batches;
+using Pz.Connectors.Abstractions.Formats;
 
 namespace Pz.Connector.MongoDb;
 
@@ -62,6 +64,7 @@ internal sealed class DocumentBatchBuilder
 
         return column.Kind switch
         {
+            ColumnKind.Nested => ToNested(column, value, column.NestedType!, document),
             ColumnKind.Json => MongoSerialization.ToCanonicalJson(value),
             ColumnKind.String => ToText(value),
             ColumnKind.ObjectId => value.BsonType switch
@@ -104,6 +107,121 @@ internal sealed class DocumentBatchBuilder
 
         value = current;
         return true;
+    }
+
+    /// <summary>A BSON sub-document or array as the boxed shape <see cref="ArrowBatchBuilder"/> takes for
+    /// <paramref name="type"/>: a struct from a document (a missing field is null), a list from an array,
+    /// a map from a document keyed by its field names. Leaves go through the flat converters, so a
+    /// date, decimal or integer is checked exactly as a top-level column of that type is; a value of
+    /// the wrong shape fails the read naming the column and the document.</summary>
+    private object? ToNested(ColumnSpec column, BsonValue value, IArrowType type, BsonDocument document)
+    {
+        if (value.IsBsonNull || value.BsonType == BsonType.Undefined)
+        {
+            return null;
+        }
+
+        switch (type)
+        {
+            case StructType @struct:
+            {
+                if (value is not BsonDocument sub)
+                {
+                    throw Refuse(column, document, $"holds {Describe(value)} where a struct is planned");
+                }
+
+                var fields = new Dictionary<string, object?>(@struct.Fields.Count, StringComparer.Ordinal);
+                foreach (var field in @struct.Fields)
+                {
+                    fields[field.Name] = sub.TryGetValue(field.Name, out var inner)
+                        ? ToNested(column, inner, field.DataType, document)
+                        : null;
+                }
+
+                return fields;
+            }
+
+            case ListType list:
+                return ToList(column, value, list.ValueDataType, document);
+            case FixedSizeListType fixedList:
+                return ToList(column, value, fixedList.ValueDataType, document);
+            case MapType map:
+            {
+                if (value is not BsonDocument sub)
+                {
+                    throw Refuse(column, document, $"holds {Describe(value)} where a map is planned");
+                }
+
+                var entries = new Dictionary<object, object?>(sub.ElementCount);
+                foreach (var element in sub)
+                {
+                    entries[MapKey(column, element.Name, map.KeyField.DataType, document)] =
+                        ToNested(column, element.Value, map.ValueField.DataType, document);
+                }
+
+                return entries;
+            }
+
+            default:
+                return ToLeaf(column, value, type, document);
+        }
+    }
+
+    private List<object?> ToList(ColumnSpec column, BsonValue value, IArrowType item, BsonDocument document)
+    {
+        if (value is not BsonArray array)
+        {
+            throw Refuse(column, document, $"holds {Describe(value)} where an array is planned");
+        }
+
+        var items = new List<object?>(array.Count);
+        foreach (var element in array)
+        {
+            items.Add(ToNested(column, element, item, document));
+        }
+
+        return items;
+    }
+
+    private object ToLeaf(ColumnSpec column, BsonValue value, IArrowType type, BsonDocument document) => type switch
+    {
+        Int32Type => ToInt32(column, value, document),
+        Int64Type => ToInt64(column, value, document),
+        DoubleType => ToDouble(column, value, document),
+        Decimal128Type => ToDecimal(column, value, document),
+        StringType => ToText(value),
+        BooleanType => value.BsonType == BsonType.Boolean
+            ? value.AsBoolean
+            : throw Refuse(column, document, $"holds {Describe(value)} where a boolean is planned"),
+        Date32Type => value.BsonType == BsonType.DateTime
+            ? DateOnly.FromDateTime(ToTimestamp(column, value, document).UtcDateTime)
+            : throw Refuse(column, document, $"holds {Describe(value)} where a date is planned"),
+        TimestampType => ToTimestamp(column, value, document),
+        _ => throw new InvalidOperationException($"unexpected nested leaf type {type}"),
+    };
+
+    /// <summary>A sub-document's field name as the map's key type: BSON field names are text, so a
+    /// non-text key type parses it and a name that does not parse fails the read.</summary>
+    private object MapKey(ColumnSpec column, string name, IArrowType keyType, BsonDocument document)
+    {
+        try
+        {
+            return keyType switch
+            {
+                Int32Type => int.Parse(name, NumberStyles.Integer, CultureInfo.InvariantCulture),
+                Int64Type => long.Parse(name, NumberStyles.Integer, CultureInfo.InvariantCulture),
+                DoubleType => double.Parse(name, NumberStyles.Float, CultureInfo.InvariantCulture),
+                Decimal128Type => decimal.Parse(name, NumberStyles.Number, CultureInfo.InvariantCulture),
+                BooleanType => bool.Parse(name),
+                Date32Type => DateOnly.ParseExact(name, "yyyy-MM-dd", CultureInfo.InvariantCulture),
+                TimestampType => DateTimeOffset.Parse(name, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+                _ => name,
+            };
+        }
+        catch (Exception ex) when (ex is FormatException or OverflowException)
+        {
+            throw Refuse(column, document, $"has the map key \"{name}\", which is not a {ColumnContractType.ToDuckDbName(keyType).ToLowerInvariant()}");
+        }
     }
 
     /// <summary>The text column is the lossless escape: any scalar has a text spelling, and a

@@ -36,7 +36,8 @@ public sealed class MongoConnector : IConnector, ISourceConnector, ISinkConnecto
 
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.BoundedWindow | ConnectorCapabilities.InclusiveWatermarkBound
-        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.ReportsStats;
+        | ConnectorCapabilities.Merge | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.ReportsStats
+        | ConnectorCapabilities.NestedTypes;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["uri"], "properties": {

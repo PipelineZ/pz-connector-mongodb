@@ -1,18 +1,23 @@
 using Apache.Arrow;
 using Apache.Arrow.Types;
 using MongoDB.Bson;
+using Pz.Connectors.Abstractions.Formats;
 
 namespace Pz.Connector.MongoDb;
 
 /// <summary>How a column's value is read out of a document and spelled in Arrow. <see cref="Json"/>
 /// takes any BSON value as canonical extended JSON text; <see cref="ObjectId"/> is a text column
-/// that reads an ObjectId as its 24-hex spelling.</summary>
-internal enum ColumnKind { String, ObjectId, Int32, Int64, Double, Decimal, Boolean, Timestamp, Date, Json }
+/// that reads an ObjectId as its 24-hex spelling; <see cref="Nested"/> reads a sub-document or array
+/// into the typed struct, list or map value its <see cref="ColumnSpec.NestedType"/> describes.</summary>
+internal enum ColumnKind { String, ObjectId, Int32, Int64, Double, Decimal, Boolean, Timestamp, Date, Json, Nested }
 
 /// <summary>One column: its name (the dotted BSON path), the path inside the document, and its kind.</summary>
-internal sealed record ColumnSpec(string Name, string[] Path, ColumnKind Kind)
+internal sealed record ColumnSpec(string Name, string[] Path, ColumnKind Kind, IArrowType? NestedType = null)
 {
     public static ColumnSpec Of(string path, ColumnKind kind) => new(path, path.Split('.'), kind);
+
+    /// <summary>A column of a struct, list or map type, as declared in the columns: contract grammar.</summary>
+    public static ColumnSpec OfNested(string path, IArrowType type) => new(path, path.Split('.'), ColumnKind.Nested, type);
 }
 
 /// <summary>The dataset's Arrow schema and, per column, how to fill it. <c>_id</c> is the one
@@ -25,7 +30,7 @@ internal sealed class ColumnPlan
     public ColumnPlan(IReadOnlyList<ColumnSpec> columns)
     {
         Columns = columns;
-        Schema = new Schema(columns.Select(c => new Field(c.Name, ArrowType(c.Kind), c.Name != "_id")).ToList(), null);
+        Schema = new Schema(columns.Select(c => new Field(c.Name, ArrowType(c), c.Name != "_id")).ToList(), null);
     }
 
     public IReadOnlyList<ColumnSpec> Columns { get; }
@@ -81,6 +86,9 @@ internal sealed class ColumnPlan
         return new ColumnPlan(kept);
     }
 
+    public static IArrowType ArrowType(ColumnSpec column) =>
+        column.Kind == ColumnKind.Nested ? column.NestedType! : ArrowType(column.Kind);
+
     public static IArrowType ArrowType(ColumnKind kind) => kind switch
     {
         ColumnKind.Int32 => Int32Type.Default,
@@ -113,7 +121,8 @@ internal sealed class ColumnPlan
         }
     }
 
-    public const string KindNames = "string, objectid, int32, int64, double, decimal, bool, timestamp, date, json";
+    public static readonly string KindNames =
+        "string, objectid, int32, int64, double, decimal, bool, timestamp, date, json, or nested: " + ColumnContractType.Syntax;
 
     /// <summary>More columns than this is not a table but a map with dynamic keys (a per-user
     /// bag, an attribute dictionary); such a field belongs under <c>fields:</c> as <c>json</c>.</summary>

@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.Json;
+using Apache.Arrow.Types;
 using MongoDB.Bson;
+using Pz.Connectors.Abstractions.Formats;
 using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.MongoDb;
@@ -112,6 +114,12 @@ internal sealed record MongoDatasetConfig(
             var typeText = typeRaw?.ToString() ?? "";
             if (!ColumnPlan.TryParseKind(typeText, out var kind))
             {
+                if (ColumnContractType.TryParse(typeText, out var nested, out _) && nested is NestedType)
+                {
+                    columns.Add(ColumnSpec.OfNested(name, nested));
+                    continue;
+                }
+
                 errors.Add($"{prefix}: field '{name}' has unknown type '{typeText}'; known: {ColumnPlan.KindNames}");
                 continue;
             }

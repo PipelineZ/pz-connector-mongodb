@@ -64,15 +64,25 @@ internal sealed record MongoOutputConfig(string Collection, int BatchSize, IRead
     /// <summary>Every column must be spellable as BSON and nameable as a field, a merge output's keys
     /// must be present columns (the filter is built from them), and an <c>object_ids</c> entry that
     /// names a present column must name a text one.</summary>
+    /// <summary>A flat type the writer spells, or a struct, list or map whose every leaf is one.</summary>
+    private static bool IsDocumentType(IArrowType type) => type switch
+    {
+        StructType s => s.Fields.All(f => IsDocumentType(f.DataType)),
+        ListType l => IsDocumentType(l.ValueDataType),
+        FixedSizeListType l => IsDocumentType(l.ValueDataType),
+        MapType m => IsDocumentType(m.KeyField.DataType) && IsDocumentType(m.ValueField.DataType),
+        _ => DocumentTypes.Contains(type.TypeId),
+    };
+
     public static void ValidateSchema(OutputSpec spec, MongoOutputConfig output, Schema schema, List<string> errors)
     {
         var prefix = $"output '{spec.Output}'";
         foreach (var field in schema.FieldsList)
         {
-            if (!DocumentTypes.Contains(field.DataType.TypeId))
+            if (!IsDocumentType(field.DataType))
             {
                 errors.Add($"{prefix}: column '{field.Name}' is {field.DataType.TypeId}, which a BSON document cannot carry; "
-                    + $"allowed: {string.Join(", ", DocumentTypes)}. Drop it from the pipeline's projection or cast it");
+                    + $"allowed: {string.Join(", ", DocumentTypes)}. Nested struct, list and map columns are allowed when every leaf is one of these. Drop it from the pipeline's projection or cast it");
             }
 
             if (field.Name.Length == 0 || field.Name.Split('.').Any(s => s.Length == 0 || s.StartsWith('$')))

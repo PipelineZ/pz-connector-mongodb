@@ -63,7 +63,7 @@ jobs:
           unzip -p "${PKG}" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "mongodb"' manifest.json
-          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites; do
+          for cap in ColumnPruning BoundedWindow InclusiveWatermarkBound Merge ReplaceWrites NestedTypes; do
             grep -q "\"${cap}\"" manifest.json
           done
           # The gallery icon and README ride inside the package; a lost <None Pack="true"> item

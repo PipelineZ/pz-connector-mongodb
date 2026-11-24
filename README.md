@@ -67,6 +67,23 @@ Credentials go either inside the uri (`mongodb://user:pass@host/?authSource=admi
 (SQL spellings such as `varchar`, `bigint`, `boolean` work too). The columns are exactly those, in
 that order; a pipeline that must not change shape when the data does declares them.
 
+**Nested columns.** A field may also be declared with a nested type in pz's column grammar:
+`varchar[]`, `int[3]`, `struct(name varchar, tags varchar[])`, `map(varchar, bigint)`, nested freely.
+The sub-document or array is read into that typed value (a struct from a document, a list from an
+array, a map from a document keyed by its field names) instead of landing as JSON text. Leaves are
+checked like flat columns: dates and timestamps come from BSON dates, decimals keep nine fraction
+digits, and a value of the wrong shape fails the read naming the field and the document's `_id`. A
+struct field a document lacks is null. Inference is unchanged: arrays and documents it cannot flatten
+still land as `json` text; declare `fields:` to read them typed.
+
+```yaml
+fields:
+  address: struct(city varchar, geo struct(lat double, lon double))
+  tags: varchar[]
+  lines: struct(sku varchar, qty int)[]
+  attrs: map(varchar, bigint)
+```
+
 **Inferred schema.** Without `fields:`, the first `sample_size` documents matching `filter`, in
 ascending `_id`, are inspected. Every scalar field becomes a column named by its path, nested
 documents flatten into `parent.child` columns, and `_id` is one trailing column:
@@ -135,7 +152,9 @@ as themselves, decimals as `decimal128` (every digit), dates as midnight UTC, ti
 dates (milliseconds; finer digits are dropped), nulls as `null`. A dotted column name nests:
 `address.city` becomes `{ address: { city: ... } }`, the inverse of the source's flattening. A varchar
 column listed under `object_ids` whose value is 24 hex characters is written as an ObjectId, so a
-`_id` read by this connector round-trips. Columns outside pz's type matrix, names starting with `$`,
+`_id` read by this connector round-trips. Nested columns are accepted (`NestedTypes`): a struct is
+written as a sub-document, a list or fixed-size list as an array, and a map as a sub-document keyed by
+the key's text; their leaves are spelled like flat columns, and a null cell is `null`. Columns outside pz's type matrix, names starting with `$`,
 and a column that is both a value and the parent of another (`a` and `a.b`) are refused before a
 request is sent.
 
